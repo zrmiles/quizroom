@@ -1,0 +1,38 @@
+[project]
+name = "quizroom-backend"
+version = "0.1.0"
+description = "QuizRoom — API и игровой движок онлайн-викторин"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.32.1",
+    "sqlalchemy[asyncio]==2.0.36",
+    "asyncpg==0.30.0",
+    "aiosqlite==0.20.0",
+    "pydantic-settings==2.6.1",
+    "email-validator==2.2.0",
+    "pyjwt==2.10.1",
+    "bcrypt==4.2.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.4",
+    "pytest-timeout==2.3.1",
+    "httpx==0.28.1",
+    "ruff==0.8.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+timeout = 30
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008"]
