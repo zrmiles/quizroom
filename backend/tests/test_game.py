@@ -40,7 +40,6 @@ def test_full_game_three_question_types(client, host, quiz):
     single, number, order = quiz["questions"]
     right = next(o["id"] for o in single["options"] if o["is_correct"])
     wrong = next(o["id"] for o in single["options"] if not o["is_correct"])
-    correct_order = [o["id"] for o in order["options"]]
 
     with (
         client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
@@ -86,6 +85,8 @@ def test_full_game_three_question_types(client, host, quiz):
         h.send_json({"type": "host:next"})
         q = recv_until(pa, "question:start")["question"]
         recv_until(pt, "question:start")
+        by_text = {o["text"]: o["id"] for o in q["options"]}
+        correct_order = [by_text[o["text"]] for o in order["options"]]
         shown = [o["id"] for o in q["options"]]
         assert sorted(shown) == sorted(correct_order) and shown != correct_order
         answer(pa, 2, {"order": correct_order})

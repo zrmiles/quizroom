@@ -4,8 +4,8 @@ import uuid
 
 # Отдельная SQLite-база для тестов — до импорта приложения.
 _tmp = tempfile.mkdtemp(prefix="quizroom-test-")
-os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_tmp}/test.db"
-os.environ["JWT_SECRET"] = "test-secret"
+os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL") or f"sqlite+aiosqlite:///{_tmp}/test.db"
+os.environ["JWT_SECRET"] = "test-secret-only-for-isolated-tests-32"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
