@@ -1,26 +1,54 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StrictInt, TypeAdapter, field_validator, model_validator
 
 QuestionType = Literal["single", "number", "order"]
 Shape = Literal["round", "blob", "box"]
 
 AVATAR_COLORS = {"#FF7A59", "#FFD23F", "#5BD9A0", "#9B8CFF", "#4CC9F0", "#FF8FC7"}
 
+# Конечное число разумного размера: Infinity/NaN ломают JSON-ответ и сохраняют «битую» викторину.
+FiniteNumber = Annotated[float, Field(allow_inf_nan=False, ge=-1e12, le=1e12)]
+
+
+def _strip_required(v: str, message: str) -> str:
+    v = " ".join(v.split())
+    if not v:
+        raise ValueError(message)
+    return v
+
 
 # ---------- Auth ----------
 
 
-class RegisterIn(BaseModel):
+class PasswordIn(BaseModel):
+    password: str = Field(max_length=72)
+
+    @field_validator("password")
+    @classmethod
+    def password_bytes(cls, v: str) -> str:
+        if len(v.encode()) > 72:
+            raise ValueError("Пароль слишком длинный: не более 72 байт UTF-8")
+        return v
+
+
+class RegisterIn(PasswordIn):
     email: EmailStr
     username: str = Field(min_length=2, max_length=40)
     password: str = Field(min_length=8, max_length=72)
 
+    @field_validator("username")
+    @classmethod
+    def clean_username(cls, v: str) -> str:
+        v = _strip_required(v, "Введите имя")
+        if len(v) < 2:
+            raise ValueError("Имя — от 2 символов")
+        return v
 
-class LoginIn(BaseModel):
+
+class LoginIn(PasswordIn):
     email: EmailStr
-    password: str = Field(max_length=72)
 
 
 class UserOut(BaseModel):
@@ -58,10 +86,10 @@ class QuestionIn(BaseModel):
     text: str = Field(min_length=1, max_length=500)
     time_limit: int = Field(default=20, ge=5, le=120)
     options: list[OptionIn] = []
-    number_answer: float | None = None
-    number_min: float | None = None
-    number_max: float | None = None
-    number_tolerance: float | None = None
+    number_answer: FiniteNumber | None = None
+    number_min: FiniteNumber | None = None
+    number_max: FiniteNumber | None = None
+    number_tolerance: FiniteNumber | None = None
     number_exact_bonus: bool = False
 
     @model_validator(mode="after")
@@ -98,6 +126,11 @@ class QuizIn(BaseModel):
     description: str = Field(default="", max_length=1000)
     is_public: bool = False
     questions: list[QuestionIn] = Field(default=[], max_length=50)
+
+    @field_validator("title")
+    @classmethod
+    def clean_title(cls, v: str) -> str:
+        return _strip_required(v, "Дайте викторине название")
 
 
 class OptionOut(BaseModel):
@@ -202,3 +235,47 @@ class SessionHistoryItem(BaseModel):
     player_count: int
     question_count: int
     parent_session_id: int | None
+
+
+# WebSocket-команды и ответы проверяются независимо от REST-схем.
+class StrictMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class HostCommand(StrictMessage):
+    type: Literal["host:start", "host:next", "host:skip", "host:end"]
+
+
+class KickCommand(StrictMessage):
+    type: Literal["host:kick"]
+    player_id: StrictInt
+
+
+class AnswerCommand(StrictMessage):
+    type: Literal["player:answer"]
+    questionIndex: StrictInt = Field(ge=0)
+    value: dict
+
+
+class WaveCommand(StrictMessage):
+    type: Literal["player:wave"]
+
+
+GAME_COMMAND = TypeAdapter(
+    Annotated[HostCommand | KickCommand | AnswerCommand | WaveCommand, Field(discriminator="type")]
+)
+
+
+class SingleAnswer(StrictMessage):
+    option_id: StrictInt
+
+
+class NumberAnswer(StrictMessage):
+    number: Annotated[float, Field(strict=True, allow_inf_nan=False, ge=-1e12, le=1e12)]
+
+
+class OrderAnswer(StrictMessage):
+    order: list[StrictInt] = Field(max_length=6)
+
+
+ANSWER_SCHEMAS = {"single": SingleAnswer, "number": NumberAnswer, "order": OrderAnswer}

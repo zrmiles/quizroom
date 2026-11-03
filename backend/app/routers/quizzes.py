@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db import get_db
 from app.deps import get_current_user
+from app.game.engine import manager
 from app.models import AnswerOption, Question, Quiz, User
 from app.schemas import QuizIn, QuizOut, QuizSummary
 
@@ -31,6 +32,7 @@ def _fill(quiz: Quiz, data: QuizIn) -> None:
     quiz.title = data.title.strip()
     quiz.description = data.description.strip()
     quiz.is_public = data.is_public
+    quiz.updated_at = func.now()  # иначе правка только вопросов не меняет дату
     quiz.questions.clear()
     for pos, q in enumerate(data.questions):
         question = Question(
@@ -93,6 +95,8 @@ async def delete_quiz(quiz_id: int, user: User = Depends(get_current_user), db: 
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Викторина не найдена")
     if owner_id != user.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Это не ваша викторина")
+    # Сначала закрываем идущие комнаты этой викторины, чтобы игроки не упирались в удалённую сессию.
+    await manager.close_quiz_rooms(quiz_id)
     # Вопросы, варианты, сессии и ответы удаляет база по ON DELETE CASCADE.
     await db.execute(delete(Quiz).where(Quiz.id == quiz_id))
     await db.commit()

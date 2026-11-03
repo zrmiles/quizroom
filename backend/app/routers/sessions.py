@@ -1,8 +1,10 @@
 import secrets
+from copy import deepcopy
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -46,21 +48,44 @@ def build_snapshot(questions: list[Question]) -> list[dict[str, Any]]:
                 exact_bonus=q.number_exact_bonus,
             )
         elif q.type == "order":
-            item["correct_order"] = [o.id for o in q.options]
+            item["correct_order"] = [o["id"] for o in options]
         snap.append(item)
     return snap
+
+
+def _session_snapshot(snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Новые непрозрачные ID также при повторе игр, созданных до исправления."""
+    snapshot = deepcopy(snapshot)
+    for q in snapshot:
+        if q["type"] != "order":
+            continue
+        ids: set[int] = set()
+        mapping: dict[int, int] = {}
+        for option in q["options"]:
+            option_id = secrets.randbelow(2**53 - 1) + 1
+            while option_id in ids:
+                option_id = secrets.randbelow(2**53 - 1) + 1
+            ids.add(option_id)
+            mapping[option["id"]] = option_id
+            option["id"] = option_id
+        q["correct_order"] = [mapping[option_id] for option_id in q["correct_order"]]
+    return snapshot
 
 
 async def _open_room(
     db: AsyncSession, quiz_id: int, user: User, title: str, snapshot: list[dict[str, Any]], parent_id: int | None = None
 ) -> SessionCreatedOut:
-    pin = manager.new_pin()
+    snapshot = _session_snapshot(snapshot)
+    pin = manager.reserve_pin()
     gs = GameSession(
         quiz_id=quiz_id, host_id=user.id, pin=pin, title=title, snapshot=snapshot, parent_session_id=parent_id
     )
-    db.add(gs)
-    await db.commit()
-    manager.create(gs.id, pin, user.id, title, snapshot)
+    try:
+        db.add(gs)
+        await db.commit()
+        manager.create(gs.id, pin, user.id, title, snapshot, quiz_id=quiz_id)
+    finally:
+        manager.reserved_pins.discard(pin)
     return SessionCreatedOut(id=gs.id, pin=pin)
 
 
@@ -112,19 +137,41 @@ async def session_by_pin(pin: str) -> SessionPublicOut:
 @router.post("/{pin}/join", response_model=JoinOut, status_code=status.HTTP_201_CREATED)
 async def join(pin: str, data: JoinIn, db: AsyncSession = Depends(get_db)) -> JoinOut:
     room = manager.get(pin)
-    if room is None or room.state == FINISHED:
+    if room is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Комната не найдена. Проверьте код")
-    if room.nickname_taken(data.nickname):
-        raise HTTPException(status.HTTP_409_CONFLICT, "Такое имя уже занято — добавьте букву или цифру")
-    if len(room.players) >= 200:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Комната заполнена")
-    token = secrets.token_urlsafe(24)
-    avatar = data.avatar.model_dump()
-    player = Player(session_id=room.session_id, nickname=data.nickname, avatar=avatar, token=token)
-    db.add(player)
-    await db.commit()
-    room.add_player(player.id, data.nickname, avatar, token)
-    await room.broadcast_lobby()
+    # Вход в две фазы: запись в базу идёт без lock комнаты, чтобы медленная база
+    # не задерживала ответы игроков. Имя резервируется на это время.
+    nick_key = data.nickname.casefold()
+    async with room.lock:
+        if room.state == FINISHED or manager.get(pin) is not room:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Комната закрыта")
+        if room.nickname_taken(data.nickname):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Такое имя уже занято — добавьте букву или цифру")
+        if len(room.players) + len(room.reserved_nicks) >= 200:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Комната заполнена")
+        room.reserved_nicks.add(nick_key)
+    try:
+        token = secrets.token_urlsafe(24)
+        avatar = data.avatar.model_dump()
+        player = Player(session_id=room.session_id, nickname=data.nickname, avatar=avatar, token=token)
+        db.add(player)
+        try:
+            await db.commit()
+        except IntegrityError as e:
+            await db.rollback()
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Комната закрыта") from e
+        async with room.lock:
+            if room.state == FINISHED or manager.get(pin) is not room:
+                # Игра закончилась, пока шла запись: убираем строку, чтобы она не попала в отчёт.
+                # (Если итоги уже сохранились, _persist удалил её сам.)
+                await db.execute(delete(Player).where(Player.id == player.id))
+                await db.commit()
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Комната закрыта")
+            room.add_player(player.id, data.nickname, avatar, token)
+            room.touch()
+            await room.broadcast_lobby()
+    finally:
+        room.reserved_nicks.discard(nick_key)
     return JoinOut(player_id=player.id, token=token, nickname=data.nickname)
 
 
@@ -144,6 +191,8 @@ async def report(
     session_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     gs = await _own_session(db, session_id, user)
+    if gs.status == "aborted":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Игра была прервана, поэтому отчёта нет")
     if gs.status != "finished":
         raise HTTPException(status.HTTP_409_CONFLICT, "Отчёт появится, когда игра закончится")
     return build_report(gs)
@@ -240,4 +289,6 @@ async def retry_mistakes(
     if quiz_exists is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Исходная викторина удалена")
     snapshot = [gs.snapshot[i] for i in hard]
-    return await _open_room(db, gs.quiz_id, user, f"{gs.title} · работа над ошибками", snapshot, parent_id=gs.id)
+    suffix = " · работа над ошибками"
+    title = gs.title if gs.title.endswith(suffix) else f"{gs.title}{suffix}"
+    return await _open_room(db, gs.quiz_id, user, title[:120], snapshot, parent_id=gs.id)

@@ -10,22 +10,31 @@
 import asyncio
 import logging
 import random
+import secrets
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import WebSocket
+from pydantic import ValidationError
 from sqlalchemy import delete, select
 
 from app.config import settings
 from app.db import SessionLocal
-from app.game.scoring import score
+from app.game.scoring import is_exact, score
 from app.models import GameSession, Player, PlayerAnswer
+from app.schemas import GAME_COMMAND
 
 log = logging.getLogger("quizroom.game")
 
 LOBBY, QUESTION, REVEAL, FINISHED = "lobby", "question", "reveal", "finished"
+
+SEND_TIMEOUT_S = 2.0  # зависший телефон не должен тормозить рассылку всей комнате
+OUTBOX_LIMIT = 256
+WAVE_COOLDOWN_MS = 1000  # «Помахать» — не чаще раза в секунду
+FINISHED_ROOM_TTL_S = 30 * 60  # закончившуюся комнату держим полчаса (переподключиться к итогам)
+IDLE_ROOM_TTL_S = 3 * 60 * 60  # брошенную комнату закрываем через 3 часа без действий
 
 
 def now_ms() -> int:
@@ -40,16 +49,15 @@ class PlayerState:
     token: str
     score: int = 0
     connections: int = 0
+    # Переподключения во время игры (в лобби — не считаем: это не проблема связи).
+    reconnects: int = 0
+    last_wave_ms: int = 0
     sockets: set[WebSocket] = field(default_factory=set)
     answers: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def connected(self) -> bool:
         return bool(self.sockets)
-
-    @property
-    def reconnects(self) -> int:
-        return max(0, self.connections - 1)
 
     def public(self) -> dict[str, Any]:
         return {
@@ -62,8 +70,20 @@ class PlayerState:
 
 
 class Room:
-    def __init__(self, session_id: int, pin: str, host_id: int, title: str, questions: list[dict[str, Any]]):
+    def __init__(
+        self,
+        session_id: int,
+        pin: str,
+        host_id: int,
+        title: str,
+        questions: list[dict[str, Any]],
+        quiz_id: int | None = None,
+    ):
         self.session_id = session_id
+        self.quiz_id = quiz_id
+        self.last_activity = time.monotonic()
+        # Имена, которые сейчас регистрируются через /join (защита от одновременных входов).
+        self.reserved_nicks: set[str] = set()
         self.pin = pin
         self.host_id = host_id
         self.title = title
@@ -74,6 +94,9 @@ class Room:
         self.ends_at_ms = 0
         self.players: dict[int, PlayerState] = {}
         self.host_sockets: set[WebSocket] = set()
+        self.outboxes: dict[WebSocket, asyncio.Queue[dict[str, Any] | int]] = {}
+        self.senders: dict[WebSocket, asyncio.Task[None]] = {}
+        self.closers: set[asyncio.Task[None]] = set()
         self.timer: asyncio.Task[None] | None = None
         self.lock = asyncio.Lock()
         # Для «по порядку» игроки видят элементы перемешанными — одинаково для всех.
@@ -91,7 +114,10 @@ class Room:
 
     def nickname_taken(self, nickname: str) -> bool:
         low = nickname.casefold()
-        return any(p.nickname.casefold() == low for p in self.players.values())
+        return low in self.reserved_nicks or any(p.nickname.casefold() == low for p in self.players.values())
+
+    def touch(self) -> None:
+        self.last_activity = time.monotonic()
 
     def player_by_token(self, token: str) -> PlayerState | None:
         return next((p for p in self.players.values() if p.token == token), None)
@@ -100,20 +126,89 @@ class Room:
         if player is None:
             self.host_sockets.add(ws)
         else:
+            if player.connections > 0 and self.state in (QUESTION, REVEAL):
+                player.reconnects += 1
             player.sockets.add(ws)
             player.connections += 1
+        self._outbox(ws, player)
+        self.touch()
 
     def detach(self, ws: WebSocket, player: PlayerState | None) -> None:
         if player is None:
             self.host_sockets.discard(ws)
         else:
             player.sockets.discard(ws)
+        self.outboxes.pop(ws, None)
+        task = self.senders.pop(ws, None)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+
+    def _outbox(self, ws: WebSocket, player: PlayerState | None) -> asyncio.Queue[dict[str, Any] | int]:
+        queue = self.outboxes.get(ws)
+        if queue is None:
+            queue = asyncio.Queue(maxsize=OUTBOX_LIMIT)
+            self.outboxes[ws] = queue
+            self.senders[ws] = asyncio.create_task(self._drain(ws, player, queue))
+        return queue
+
+    async def _drain(
+        self, ws: WebSocket, player: PlayerState | None, queue: asyncio.Queue[dict[str, Any] | int]
+    ) -> None:
+        """Одна очередь на соединение сохраняет порядок без сетевых ожиданий под lock комнаты."""
+        try:
+            while True:
+                item = await queue.get()
+                if isinstance(item, int):
+                    await asyncio.wait_for(ws.close(code=item), SEND_TIMEOUT_S)
+                    return
+                await asyncio.wait_for(ws.send_json(item), SEND_TIMEOUT_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.debug("Отключено медленное или закрытое соединение в %s", self.pin)
+        finally:
+            attached = ws in self.outboxes
+            self.detach(ws, player)
+            if attached:
+                try:
+                    await asyncio.wait_for(ws.close(code=1013), SEND_TIMEOUT_S)
+                except Exception:
+                    pass
+                if player is not None and player.id in self.players:
+                    await self.broadcast_lobby()
+                    await self.after_disconnect()
 
     async def _send(self, ws: WebSocket, msg: dict[str, Any]) -> None:
+        queue = self.outboxes.get(ws)
+        if queue is None:
+            return
         try:
-            await ws.send_json(msg)
-        except Exception:  # сокет уже закрыт — игрок переподключится и получит снапшот
-            pass
+            queue.put_nowait(msg)
+        except asyncio.QueueFull:
+            # Не держим неограниченную очередь для клиента, который не читает сообщения.
+            self._drop_socket(ws)
+
+    def _drop_socket(self, ws: WebSocket) -> None:
+        player = next((p for p in self.players.values() if ws in p.sockets), None)
+        self.detach(ws, player)
+
+        async def close() -> None:
+            try:
+                await asyncio.wait_for(ws.close(code=1013), SEND_TIMEOUT_S)
+            except Exception:
+                pass
+
+        task = asyncio.create_task(close())
+        self.closers.add(task)
+        task.add_done_callback(self.closers.discard)
+
+    async def _close_socket(self, ws: WebSocket, code: int) -> None:
+        queue = self.outboxes.get(ws)
+        if queue is not None:
+            try:
+                queue.put_nowait(code)
+            except asyncio.QueueFull:
+                self._drop_socket(ws)
 
     async def _to_hosts(self, msg: dict[str, Any]) -> None:
         for ws in list(self.host_sockets):
@@ -158,8 +253,13 @@ class Room:
         return {"correct_order": q["correct_order"]}
 
     def leaderboard(self) -> list[dict[str, Any]]:
+        """Равные очки — общее место (1, 2, 2, 4), как в спорте."""
         ranked = sorted(self.players.values(), key=lambda p: (-p.score, p.nickname.casefold()))
-        return [{**p.public(), "rank": i + 1} for i, p in enumerate(ranked)]
+        board = []
+        for i, p in enumerate(ranked):
+            rank = board[-1]["rank"] if board and board[-1]["score"] == p.score else i + 1
+            board.append({**p.public(), "rank": rank})
+        return board
 
     def _rank_of(self, player_id: int) -> int:
         return next(r["rank"] for r in self.leaderboard() if r["id"] == player_id)
@@ -206,6 +306,7 @@ class Room:
                 "correct": bool(a and a["correct"]),
                 "points": a["points"] if a else 0,
                 "exact": bool(a and a["exact"]),
+                "value": a["value"] if a else None,
                 "score": p.score,
                 "rank": self._rank_of(p.id),
             },
@@ -250,6 +351,7 @@ class Room:
             snap["answered"] = sum(1 for p in self.players.values() if self.index in p.answers)
             if player is not None:
                 snap["youAnswered"] = self.index in player.answers
+                snap["yourAnswer"] = player.answers.get(self.index, {}).get("value")
         elif self.state == REVEAL:
             snap["reveal"] = (
                 self._reveal_for_host(self.index) if player is None else self._reveal_for_player(self.index, player)
@@ -261,15 +363,27 @@ class Room:
     # ---------- команды ----------
 
     async def handle(self, ws: WebSocket, player: PlayerState | None, msg: dict[str, Any]) -> None:
-        kind = msg.get("type") if isinstance(msg, dict) else None
+        # Время получения фиксируем до ожидания lock: задержка сервера (запись в базу,
+        # очередь команд) не должна превращать своевременный ответ в просроченный.
+        received_ms = now_ms()
+        try:
+            msg = GAME_COMMAND.validate_python(msg).model_dump()
+        except ValidationError:
+            await self._send(ws, {"type": "error", "message": "Неверный формат команды"})
+            return
+        kind = msg["type"]
         async with self.lock:
+            self.touch()
             try:
                 if player is None:
                     await self._handle_host(kind, msg)
-                else:
-                    await self._handle_player(player, kind, msg)
+                elif player.id in self.players:  # удалённый игрок команд не шлёт
+                    await self._handle_player(player, kind, msg, received_ms)
             except GameError as e:
                 await self._send(ws, {"type": "error", "message": str(e)})
+            except Exception:
+                log.exception("Ошибка в комнате %s при команде %s", self.pin, kind)
+                await self._send(ws, {"type": "error", "message": "Что-то пошло не так на сервере. Попробуйте ещё раз"})
 
     async def _handle_host(self, kind: Any, msg: dict[str, Any]) -> None:
         if kind == "host:start":
@@ -297,10 +411,14 @@ class Room:
         else:
             raise GameError("Неизвестная команда")
 
-    async def _handle_player(self, p: PlayerState, kind: Any, msg: dict[str, Any]) -> None:
+    async def _handle_player(self, p: PlayerState, kind: Any, msg: dict[str, Any], received_ms: int) -> None:
         if kind == "player:answer":
-            await self._submit(p, msg.get("questionIndex"), msg.get("value"))
+            await self._submit(p, msg.get("questionIndex"), msg.get("value"), received_ms)
         elif kind == "player:wave":
+            now = now_ms()
+            if now - p.last_wave_ms < WAVE_COOLDOWN_MS:
+                return  # без ошибки: просто не рассылаем слишком частые «помахать»
+            p.last_wave_ms = now
             wave = {"type": "lobby:wave", "player_id": p.id}
             await self._to_hosts(wave)
             await self._to_players(wave)
@@ -335,22 +453,22 @@ class Room:
             self.timer.cancel()
         self.timer = None
 
-    async def _submit(self, p: PlayerState, question_index: Any, value: Any) -> None:
+    async def _submit(self, p: PlayerState, question_index: Any, value: Any, received_ms: int | None = None) -> None:
         if self.state != QUESTION or question_index != self.index:
             raise GameError("Вопрос уже закрыт")
-        now = now_ms()
+        now = received_ms if received_ms is not None else now_ms()
         if now > self.ends_at_ms + settings.answer_grace_ms:
             raise GameError("Время вышло")
         if self.index in p.answers:
-            await self._to_player(p, {"type": "answer:ack", "questionIndex": self.index})
+            await self._ack(p)
             return
         q = self.questions[self.index]
-        response_ms = now - self.started_at_ms
+        response_ms = max(0, now - self.started_at_ms)
         try:
             correct, points = score(q, value, response_ms)
         except (ValueError, KeyError, TypeError) as e:
             raise GameError(str(e) or "Неверный ответ") from e
-        exact = q["type"] == "number" and abs(float(value["number"]) - q["answer"]) < 1e-9
+        exact = q["type"] == "number" and is_exact(float(value["number"]), q["answer"], q["tolerance"])
         p.answers[self.index] = {
             "value": value,
             "correct": correct,
@@ -359,12 +477,17 @@ class Room:
             "exact": exact,
         }
         p.score += points
-        await self._to_player(p, {"type": "answer:ack", "questionIndex": self.index})
+        await self._ack(p)
         answered = sum(1 for pl in self.players.values() if self.index in pl.answers)
         await self._to_hosts({"type": "question:progress", "answered": answered, "total": len(self.players)})
         waiting = [pl for pl in self.players.values() if pl.connected and self.index not in pl.answers]
         if not waiting:
             await self._close_question()
+
+    async def _ack(self, p: PlayerState) -> None:
+        await self._to_player(
+            p, {"type": "answer:ack", "questionIndex": self.index, "value": p.answers[self.index]["value"]}
+        )
 
     async def after_disconnect(self) -> None:
         """Если ушёл единственный, кого ждали, — не держим остальных до конца таймера."""
@@ -385,10 +508,13 @@ class Room:
             await self._to_player(p, self._reveal_for_player(self.index, p))
 
     async def _finish(self) -> None:
-        self._cancel_timer()
-        self.state = FINISHED
-        # Сначала пишем в базу: клиент сразу после game:finished может открыть отчёт.
+        if self.state == QUESTION:
+            await self._close_question()
+        else:
+            self._cancel_timer()
+        # Ошибка оставляет комнату на разборе: ведущий может повторить завершение.
         await self._persist()
+        self.state = FINISHED
         await self._to_hosts(self._final_for_host())
         for p in list(self.players.values()):
             await self._to_player(p, self._final_for_player(p))
@@ -396,19 +522,47 @@ class Room:
     async def _kick(self, player_id: Any) -> None:
         if self.state != LOBBY:
             raise GameError("Удалять игроков можно только в лобби")
-        p = self.players.pop(player_id, None) if isinstance(player_id, int) else None
+        p = self.players.get(player_id) if isinstance(player_id, int) else None
         if p is None:
             raise GameError("Игрок не найден")
+        # Сначала база, потом память: при сбое база и комната остаются согласованными,
+        # а ведущий может повторить удаление.
+        try:
+            async with SessionLocal() as db:
+                await db.execute(delete(Player).where(Player.id == player_id))
+                await db.commit()
+        except Exception as e:
+            log.exception("Не удалось удалить игрока %s из базы", player_id)
+            raise GameError("Не удалось удалить игрока. Попробуйте ещё раз") from e
+        self.players.pop(player_id, None)
         for ws in list(p.sockets):
             await self._send(ws, {"type": "kicked"})
+            await self._close_socket(ws, 4001)
+        await self.broadcast_lobby()
+
+    async def shutdown(self, reason: str) -> None:
+        """Закрыть комнату для всех: викторину удалили или комната брошена."""
+        self._cancel_timer()
+        self.state = FINISHED
+        sockets = list(self.outboxes)
+        tasks = list(self.senders.values())
+        for ws in sockets:
+            player = next((p for p in self.players.values() if ws in p.sockets), None)
+            self.detach(ws, player)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        async def close(ws: WebSocket) -> None:
             try:
-                await ws.close(code=4001)
+                await asyncio.wait_for(ws.send_json({"type": "error", "message": reason}), SEND_TIMEOUT_S)
             except Exception:
                 pass
-        async with SessionLocal() as db:
-            await db.execute(delete(Player).where(Player.id == player_id))
-            await db.commit()
-        await self.broadcast_lobby()
+            try:
+                await asyncio.wait_for(ws.close(code=4404), SEND_TIMEOUT_S)
+            except Exception:
+                pass
+
+        await asyncio.gather(*(close(ws) for ws in sockets))
+        await asyncio.gather(*list(self.closers), return_exceptions=True)
 
     # ---------- база ----------
 
@@ -425,11 +579,22 @@ class Room:
             async with SessionLocal() as db:
                 gs = await db.get(GameSession, self.session_id)
                 if gs is None:
-                    return
+                    raise GameError("Игра удалена, сохранить итоги нельзя")
                 gs.status = "finished"
-                gs.finished_at = datetime.now(UTC)
+                if gs.finished_at is None:  # повтор сохранения не переписывает историю
+                    gs.finished_at = datetime.now(UTC)
                 ranks = {r["id"]: r["rank"] for r in self.leaderboard()}
+                # Строки игроков без состояния в комнате (неудачный вход или удаление) в итоги не попадают.
+                await db.execute(
+                    delete(Player).where(Player.session_id == self.session_id, Player.id.not_in(list(self.players)))
+                )
                 rows = await db.scalars(select(Player).where(Player.session_id == self.session_id))
+                # Повтор после неопределённого исхода commit безопасен: запись целиком атомарна.
+                await db.execute(
+                    delete(PlayerAnswer).where(
+                        PlayerAnswer.player_id.in_(select(Player.id).where(Player.session_id == self.session_id))
+                    )
+                )
                 for row in rows:
                     st = self.players.get(row.id)
                     if st is None:
@@ -449,8 +614,11 @@ class Room:
                             )
                         )
                 await db.commit()
-        except Exception:
+        except GameError:
+            raise
+        except Exception as e:
             log.exception("Не удалось сохранить итоги игры %s", self.session_id)
+            raise GameError("Не удалось сохранить итоги. Попробуйте завершить игру ещё раз") from e
 
 
 class GameError(Exception):
@@ -469,22 +637,75 @@ def _shuffle_not_identity(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 class GameManager:
     def __init__(self) -> None:
         self.rooms: dict[str, Room] = {}
+        self.reserved_pins: set[str] = set()
 
     def get(self, pin: str) -> Room | None:
         return self.rooms.get(pin)
 
     def new_pin(self) -> str:
         for _ in range(1000):
-            pin = f"{random.randint(0, 999_999):06d}"
-            room = self.rooms.get(pin)
-            if room is None or room.state == FINISHED:
+            pin = f"{secrets.randbelow(1_000_000):06d}"
+            if pin not in self.rooms and pin not in self.reserved_pins:
                 return pin
         raise RuntimeError("Нет свободных PIN-кодов")
 
-    def create(self, session_id: int, pin: str, host_id: int, title: str, questions: list[dict[str, Any]]) -> Room:
-        room = Room(session_id, pin, host_id, title, questions)
+    def reserve_pin(self) -> str:
+        pin = self.new_pin()
+        self.reserved_pins.add(pin)
+        return pin
+
+    def create(
+        self,
+        session_id: int,
+        pin: str,
+        host_id: int,
+        title: str,
+        questions: list[dict[str, Any]],
+        quiz_id: int | None = None,
+    ) -> Room:
+        if pin in self.rooms:
+            raise RuntimeError("PIN уже занят")
+        room = Room(session_id, pin, host_id, title, questions, quiz_id=quiz_id)
         self.rooms[pin] = room
+        self.reserved_pins.discard(pin)
         return room
+
+    async def close_quiz_rooms(self, quiz_id: int) -> None:
+        for pin, room in list(self.rooms.items()):
+            if room.quiz_id == quiz_id:
+                async with room.lock:
+                    await room.shutdown("Ведущий удалил эту викторину")
+                self.rooms.pop(pin, None)
+
+    async def sweep(self) -> None:
+        """Убрать из памяти закончившиеся и брошенные комнаты."""
+        now = time.monotonic()
+        for pin, room in list(self.rooms.items()):
+            idle = now - room.last_activity
+            if room.state == FINISHED and idle > FINISHED_ROOM_TTL_S:
+                async with room.lock:
+                    if time.monotonic() - room.last_activity <= FINISHED_ROOM_TTL_S:
+                        continue
+                    await room.shutdown("Время хранения итогов комнаты истекло")
+                self.rooms.pop(pin, None)
+            elif room.state != FINISHED and idle > IDLE_ROOM_TTL_S:
+                async with room.lock:
+                    if time.monotonic() - room.last_activity <= IDLE_ROOM_TTL_S:
+                        continue
+                    await room.shutdown("Комната закрыта: давно не было активности")
+                await _mark_aborted(room.session_id)
+                self.rooms.pop(pin, None)
+
+
+async def _mark_aborted(session_id: int) -> None:
+    try:
+        async with SessionLocal() as db:
+            gs = await db.get(GameSession, session_id)
+            if gs is not None and gs.status != "finished":
+                gs.status = "aborted"
+                await db.commit()
+    except Exception:
+        log.exception("Не удалось пометить игру %s прерванной", session_id)
 
 
 manager = GameManager()

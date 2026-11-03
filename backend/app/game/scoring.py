@@ -3,7 +3,12 @@
 Вопрос здесь — словарь из snapshot сессии (см. sessions.build_snapshot).
 """
 
+import math
 from typing import Any
+
+from pydantic import ValidationError
+
+from app.schemas import ANSWER_SCHEMAS
 
 MAX_POINTS = 1000
 
@@ -13,6 +18,18 @@ def speed_factor(response_ms: int, time_limit_s: int) -> float:
     limit_ms = max(time_limit_s, 1) * 1000
     t = min(max(response_ms, 0), limit_ms) / limit_ms
     return 1 - 0.5 * t
+
+
+def is_exact(guess: float, answer: float, tolerance: float) -> bool:
+    """Точное попадание — единое правило для бонуса, флага `exact` и сообщения игроку.
+
+    Совпадение с точностью до погрешности float (относительной 1e-12) и обязательно
+    строже допуска вопроса: ответ за пределами допуска точным не бывает.
+    """
+    diff = abs(guess - answer)
+    if diff >= tolerance:
+        return False
+    return math.isclose(guess, answer, rel_tol=1e-12, abs_tol=min(1e-12, tolerance / 1000))
 
 
 def score_single(q: dict[str, Any], value: dict[str, Any], response_ms: int) -> tuple[bool, int]:
@@ -35,7 +52,7 @@ def score_number(q: dict[str, Any], value: dict[str, Any], response_ms: int) -> 
     diff = abs(guess - q["answer"])
     closeness = max(0.0, 1 - diff / q["tolerance"])
     points = MAX_POINTS * speed_factor(response_ms, q["time_limit"]) * closeness
-    if diff < 1e-9 and q["exact_bonus"]:
+    if q["exact_bonus"] and is_exact(guess, q["answer"], q["tolerance"]):
         points *= 2
     points_int = round(points)
     return points_int > 0, points_int
@@ -58,4 +75,8 @@ SCORERS = {"single": score_single, "number": score_number, "order": score_order}
 def score(q: dict[str, Any], value: dict[str, Any], response_ms: int) -> tuple[bool, int]:
     if not isinstance(value, dict):
         raise ValueError("Неверный формат ответа")
+    try:
+        value = ANSWER_SCHEMAS[q["type"]].model_validate(value).model_dump()
+    except ValidationError as e:
+        raise ValueError("Неверный формат ответа") from e
     return SCORERS[q["type"]](q, value, response_ms)
