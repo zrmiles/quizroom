@@ -24,7 +24,7 @@
 ## Запуск через Docker
 
 ```bash
-cp .env.example .env
+cp .env.example .env   # впишите JWT_SECRET — без него compose не запустится
 docker compose up --build
 ```
 
@@ -32,11 +32,12 @@ docker compose up --build
 
 ## Запуск для разработки
 
-Нужны Python 3.12, [uv](https://docs.astral.sh/uv/) и Node.js 20+.
+Нужны Python 3.12, [uv](https://docs.astral.sh/uv/) и Node.js 22.12+ (ветка 22) или 24.x.
 
 ```bash
 # backend — http://localhost:8000, документация API: /docs
 cd backend
+export JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 uv sync
 uv run uvicorn app.main:app --reload
 ```
@@ -48,13 +49,29 @@ npm install
 npm run dev
 ```
 
+Backend требует `JWT_SECRET` длиной от 32 символов. Для постоянной локальной настройки сохраните его
+в `backend/.env` и используйте один и тот же ключ после перезапуска. Файл `.env` не коммитьте.
+Dev-сервер по умолчанию слушает `127.0.0.1`; для проверки с телефона в своей сети запустите
+`npm run dev -- --host`. Доступ с посторонних веб-origin запрещён.
+
 Без настроек backend использует SQLite-файл `backend/quizroom.db`. Для PostgreSQL задайте `DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/db`.
 
 ## Тесты
 
 ```bash
-cd backend && uv run pytest        # 29 тестов: очки, API, полная игра по WebSocket
-cd frontend && npm test            # проверка вопросов, форматирование, таймер
+cd backend && uv run pytest        # очки, API, WebSocket, сбои БД и конкурентные операции
+cd frontend && npm test            # проверка вопросов, форматирование, таймер, выгрузка
+```
+
+В CI backend-тесты проходят на SQLite и PostgreSQL. Для отдельной одноразовой PostgreSQL-базы локально:
+`TEST_DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/quizroom_test uv run pytest`.
+Frontend-тесты включают проверки компонентов: дробный ввод, подтверждение ответа, восстановление входа
+и защита несохранённых правок редактора.
+
+Сценарный и нагрузочный прогон по запущенному серверу (несколько игроков, обрывы связи, 60 игроков сразу):
+
+```bash
+cd backend && PORT=8000 uv run python scripts/live_scenarios.py
 ```
 
 ## Как это устроено
@@ -86,7 +103,9 @@ cd frontend && npm test            # проверка вопросов, форм
 
 Полная интерактивная документация — http://localhost:8000/docs.
 
-### WebSocket `/ws/game/{pin}?role=host|player&token=…`
+### WebSocket `/ws/game/{pin}`
+
+Первым сообщением клиент присылает `{"type": "auth", "role": "host" | "player", "token": "…"}` — токен не передаётся в адресе, чтобы не попадать в логи сервера и прокси.
 
 - Ведущий → сервер: `host:start`, `host:next`, `host:skip`, `host:end`, `host:kick`
 - Игрок → сервер: `player:answer {questionIndex, value}`, `player:wave`
