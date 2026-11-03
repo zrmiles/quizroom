@@ -18,3 +18,7 @@ dist/
 audit/**
 !audit/**/
 !audit/**/*.md
+
+# Локальные настройки инструментов разработки
+.claude/
+CLAUDE.md
