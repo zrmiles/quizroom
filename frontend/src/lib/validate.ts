@@ -13,7 +13,8 @@ export function questionProblems(q: QuestionDraft): string[] {
   }
   if (q.type === 'number') {
     const { number_answer: a, number_min: lo, number_max: hi, number_tolerance: tol } = q
-    if ([a, lo, hi, tol].some((v) => v === null || Number.isNaN(v))) p.push('Заполните ответ, шкалу и допуск')
+    if ([a, lo, hi, tol].some((v) => v === null || !Number.isFinite(v))) p.push('Заполните ответ, шкалу и допуск')
+    else if ([a, lo, hi, tol].some((v) => Math.abs(v!) > 1e12)) p.push('Слишком большое число')
     else {
       if (!(lo! < hi!)) p.push('«От» должно быть меньше «до»')
       else if (a! < lo! || a! > hi!) p.push('Ответ вне шкалы')

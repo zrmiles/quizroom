@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState, type MutableRefObject } from 'react'
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react'
 import { Link, Navigate, useParams } from 'react-router-dom'
 
 import { Creature } from '../components/Creature'
-import { Timer } from '../components/Timer'
+import { Timer, remainingMs } from '../components/Timer'
 import { LETTERS, TYPE_LABELS, formatNumber, formatPoints } from '../lib/format'
 import { load, playerKey, remove, type PlayerTicket } from '../lib/storage'
 import type { PlayerFinal, PlayerReveal, PublicPlayer, PublicQuestion, RoomState } from '../lib/types'
@@ -16,6 +16,7 @@ interface PlayState {
   question: PublicQuestion | null
   endsAt: number
   answered: boolean
+  pending: boolean
   myChoice: unknown
   reveal: PlayerReveal | null
   final: PlayerFinal | null
@@ -23,7 +24,7 @@ interface PlayState {
 }
 
 const initial: PlayState = {
-  phase: 'connecting', title: '', me: null, playerCount: 0, question: null, endsAt: 0, answered: false,
+  phase: 'connecting', title: '', me: null, playerCount: 0, question: null, endsAt: 0, answered: false, pending: false,
   myChoice: null, reveal: null, final: null, error: null,
 }
 
@@ -32,8 +33,11 @@ export function Play() {
   const ticket = load<PlayerTicket>(playerKey(pin))
   const [s, setS] = useState<PlayState>(initial)
   const [jump, setJump] = useState(false)
+  const pendingAnswer = useRef<number | null>(null)
 
   const onMessage = useCallback((msg: GameMessage) => {
+    if (['state:snapshot', 'question:start', 'question:reveal', 'game:finished', 'error'].includes(msg.type)
+      || (msg.type === 'answer:ack' && msg.questionIndex === pendingAnswer.current)) pendingAnswer.current = null
     setS((prev) => {
       switch (msg.type) {
         case 'state:snapshot': {
@@ -47,6 +51,8 @@ export function Play() {
             question: (msg.question as PublicQuestion | undefined) ?? reveal?.question ?? null,
             endsAt: (msg.endsAt as number | undefined) ?? 0,
             answered: Boolean(msg.youAnswered),
+            pending: false,
+            myChoice: msg.yourAnswer ?? null,
             reveal,
             final: (msg.final as PlayerFinal | undefined) ?? null,
             error: null,
@@ -56,18 +62,19 @@ export function Play() {
           return { ...prev, playerCount: (msg.playerCount as number) ?? prev.playerCount }
         case 'question:start':
           return { ...prev, phase: 'question', question: msg.question as PublicQuestion, endsAt: msg.endsAt as number,
-            answered: false, myChoice: null, reveal: null, error: null }
+            answered: false, pending: false, myChoice: null, reveal: null, error: null }
         case 'answer:ack':
-          return { ...prev, answered: true, error: null }
+          return msg.questionIndex === prev.question?.index
+            ? { ...prev, answered: true, pending: false, myChoice: msg.value ?? prev.myChoice, error: null } : prev
         case 'question:reveal': {
           const reveal = msg as unknown as PlayerReveal
-          return { ...prev, phase: 'reveal', reveal,
+          return { ...prev, phase: 'reveal', pending: false, reveal,
             me: prev.me ? { ...prev.me, score: reveal.you.score, rank: reveal.you.rank } : prev.me }
         }
         case 'game:finished':
-          return { ...prev, phase: 'finished', final: msg as unknown as PlayerFinal }
+          return { ...prev, phase: 'finished', pending: false, final: msg as unknown as PlayerFinal }
         case 'error':
-          return { ...prev, error: String(msg.message) }
+          return { ...prev, pending: false, error: String(msg.message) }
         default:
           return prev
       }
@@ -97,9 +104,13 @@ export function Play() {
   }
 
   const answer = (value: unknown) => {
-    if (!s.question || s.answered) return
-    setS((p) => ({ ...p, myChoice: value }))
-    send({ type: 'player:answer', questionIndex: s.question.index, value })
+    if (!s.question || s.phase !== 'question' || s.answered || pendingAnswer.current !== null) return
+    pendingAnswer.current = s.question.index
+    const sent = send({ type: 'player:answer', questionIndex: s.question.index, value })
+    if (!sent) pendingAnswer.current = null
+    setS((p) => (sent
+      ? { ...p, pending: true, myChoice: value, error: null }
+      : { ...p, pending: false, myChoice: null, error: 'Нет связи с игрой — ответ не отправлен. Подождите пару секунд и нажмите ещё раз' }))
   }
 
   const me = s.me
@@ -112,7 +123,7 @@ export function Play() {
             {me ? `${me.nickname} · ${formatPoints(me.score)}` : ticket.nickname}
           </span>
         </div>
-        {status !== 'open' && <span className="chip chip-sand" role="status">Переподключаемся…</span>}
+        {status === 'reconnecting' && <span className="chip chip-sand" role="status">Переподключаемся…</span>}
         {s.question && s.phase !== 'lobby' && (
           <span className="small muted" style={{ fontWeight: 600 }}>
             {s.question.index + 1} из {s.question.total}
@@ -138,7 +149,7 @@ export function Play() {
 
       {s.phase === 'question' && s.question && (
         <QuestionView key={s.question.index} q={s.question} endsAt={s.endsAt} offsetRef={offsetRef}
-          answered={s.answered} myChoice={s.myChoice} onAnswer={answer} error={s.error} />
+          answered={s.answered} pending={s.pending} myChoice={s.myChoice} onAnswer={answer} error={s.error} />
       )}
 
       {s.phase === 'reveal' && s.reveal && <RevealView r={s.reveal} />}
@@ -168,27 +179,37 @@ export function Play() {
   )
 }
 
-function QuestionView({ q, endsAt, offsetRef, answered, myChoice, onAnswer, error }: {
+export function QuestionView({ q, endsAt, offsetRef, answered, pending = false, myChoice, onAnswer, error }: {
   q: PublicQuestion
   endsAt: number
   offsetRef: MutableRefObject<number>
   answered: boolean
+  pending?: boolean
   myChoice: unknown
   onAnswer: (v: unknown) => void
   error: string | null
 }) {
   const min = q.min ?? 0
   const max = q.max ?? 100
-  const step = max - min >= 50 ? 1 : max - min >= 5 ? 0.5 : 0.1
-  const [guess, setGuess] = useState(() => Math.round((min + max) / 2))
+  const step = Math.max(Number.MIN_VALUE, 10 ** Math.floor(Math.log10((max - min) / 100)))
+  const clamp = (v: number) => Math.min(max, Math.max(min, Number(v.toPrecision(15))))
+  const [guessText, setGuessText] = useState(() => String(clamp(min + (max - min) / 2)))
+  const guess = guessText.trim() ? Number(guessText) : NaN
+  const validGuess = Number.isFinite(guess) && guess >= min && guess <= max
   const [order, setOrder] = useState(q.options)
-  const clamp = (v: number) => Math.min(max, Math.max(min, Math.round(v / step) * step))
-  const bigStep = Math.max(step, Math.round((max - min) / 10))
+  const bigStep = step * 10
   const chosen = (myChoice as { option_id?: number } | null)?.option_id
+  // Как только на таймере 0 — ответ уже не примут, поэтому сразу блокируем ввод.
+  const [expired, setExpired] = useState(() => remainingMs(endsAt, offsetRef.current) === 0)
+  useEffect(() => {
+    const id = window.setInterval(() => setExpired(remainingMs(endsAt, offsetRef.current) === 0), 200)
+    return () => window.clearInterval(id)
+  }, [endsAt, offsetRef])
+  const locked = answered || pending || expired
 
   const move = (i: number, d: number) => {
     const j = i + d
-    if (j < 0 || j >= order.length || answered) return
+    if (j < 0 || j >= order.length || locked) return
     const next = order.slice()
     ;[next[i], next[j]] = [next[j], next[i]]
     setOrder(next)
@@ -203,7 +224,7 @@ function QuestionView({ q, endsAt, offsetRef, answered, myChoice, onAnswer, erro
       {q.type === 'single' && (
         <div className="stack" style={{ gap: 10 }}>
           {q.options.map((o, i) => (
-            <button key={o.id} type="button" className="option" aria-pressed={chosen === o.id} disabled={answered}
+            <button key={o.id} type="button" className="option" aria-pressed={chosen === o.id} disabled={locked}
               onClick={() => onAnswer({ option_id: o.id })} style={answered && chosen !== o.id ? { opacity: 0.45 } : undefined}>
               <span className="letter">{LETTERS[i]}</span>
               <span>{o.text}</span>
@@ -214,16 +235,24 @@ function QuestionView({ q, endsAt, offsetRef, answered, myChoice, onAnswer, erro
 
       {q.type === 'number' && (
         <div className="card stack" style={{ gap: 14 }}>
-          <span className="big-number" aria-live="polite">{formatNumber(guess)}</span>
+          <span className="big-number" aria-live="polite">{validGuess ? formatNumber(guess) : '—'}</span>
           <label htmlFor="guess" className="sr-only">Ваш ответ</label>
-          <input id="guess" type="range" min={min} max={max} step={step} value={guess} disabled={answered}
-            onChange={(e) => setGuess(Number(e.target.value))} />
+          <input id="guess" type="range" min={min} max={max} step="any" value={validGuess ? guess : min} disabled={locked}
+            onChange={(e) => setGuessText(e.target.value)} />
           <div className="row between small muted" style={{ fontWeight: 700 }} aria-hidden="true">
             <span>{formatNumber(min)}</span><span>{formatNumber(max)}</span>
           </div>
+          <div className="field">
+            <label htmlFor="guess-exact">Введите точное значение</label>
+            <input id="guess-exact" className="input" type="number" inputMode="decimal" step="any"
+              min={min} max={max} value={guessText} disabled={locked}
+              onChange={(e) => setGuessText(e.target.value)} />
+            {!validGuess && <span className="small" role="status">Введите число от {formatNumber(min)} до {formatNumber(max)}</span>}
+          </div>
           <div className="row" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)' }}>
             {[-bigStep, -step, step, bigStep].map((d) => (
-              <button key={d} type="button" className="btn btn-sm" disabled={answered} onClick={() => setGuess(clamp(guess + d))}>
+              <button key={d} type="button" className="btn btn-sm" disabled={locked}
+                onClick={() => setGuessText(String(clamp((validGuess ? guess : min) + d)))}>
                 {d > 0 ? '+' : '−'}{formatNumber(Math.abs(d))}
               </button>
             ))}
@@ -237,10 +266,10 @@ function QuestionView({ q, endsAt, offsetRef, answered, myChoice, onAnswer, erro
             <li key={o.id} className="option" style={{ cursor: 'default' }}>
               <span className="display" style={{ width: 26, fontSize: 24 }}>{i + 1}</span>
               <span style={{ flex: 1 }}>{o.text}</span>
-              <button type="button" className="btn btn-sm" style={{ width: 44, padding: 0 }} disabled={answered || i === 0}
+              <button type="button" className="btn btn-sm" style={{ width: 44, padding: 0 }} disabled={locked || i === 0}
                 onClick={() => move(i, -1)} aria-label={`Поднять: ${o.text}`}>↑</button>
               <button type="button" className="btn btn-sm" style={{ width: 44, padding: 0 }}
-                disabled={answered || i === order.length - 1} onClick={() => move(i, 1)} aria-label={`Опустить: ${o.text}`}>↓</button>
+                disabled={locked || i === order.length - 1} onClick={() => move(i, 1)} aria-label={`Опустить: ${o.text}`}>↓</button>
             </li>
           ))}
         </ol>
@@ -250,9 +279,16 @@ function QuestionView({ q, endsAt, offsetRef, answered, myChoice, onAnswer, erro
       <div style={{ flex: 1 }} />
       {answered ? (
         <div className="alert alert-ok" role="status" style={{ textAlign: 'center' }}>Ответ принят · ждём остальных</div>
+      ) : pending ? (
+        <div className="alert" role="status" style={{ textAlign: 'center' }}>Отправляем ответ…</div>
+      ) : expired ? (
+        <div className="alert" role="status" style={{ textAlign: 'center', background: 'var(--sand)' }}>
+          Время вышло · сейчас покажем правильный ответ
+        </div>
       ) : q.type === 'number' ? (
-        <button type="button" className="btn btn-accent btn-lg btn-block" onClick={() => onAnswer({ number: guess })}>
-          Ответить: {formatNumber(guess)}
+        <button type="button" className="btn btn-accent btn-lg btn-block" disabled={!validGuess}
+          onClick={() => { if (validGuess) onAnswer({ number: guess }) }}>
+          Ответить{validGuess ? `: ${formatNumber(guess)}` : ''}
         </button>
       ) : q.type === 'order' ? (
         <button type="button" className="btn btn-accent btn-lg btn-block" onClick={() => onAnswer({ order: order.map((o) => o.id) })}>
@@ -273,17 +309,54 @@ function correctText(r: PlayerReveal): string {
   return (c.correct_order ?? []).map((id) => byId.get(id)).join(' → ')
 }
 
+type Verdict = 'exact' | 'right' | 'close' | 'miss' | 'none'
+
+/** Итог вопроса для игрока: «близко» в «угадай число» — это не «верно». */
+export function verdictOf(r: PlayerReveal): Verdict {
+  const { you, question } = r
+  if (!you.answered) return 'none'
+  if (question.type === 'number') return you.exact ? 'exact' : you.points > 0 ? 'close' : 'miss'
+  if (you.correct) return 'right'
+  return you.points > 0 ? 'close' : 'miss'
+}
+
+const VERDICT: Record<Verdict, { title: string; bg: string; fg: string }> = {
+  exact: { title: 'Точно в цель!', bg: 'var(--reef)', fg: '#fff' },
+  right: { title: 'Верно!', bg: 'var(--reef)', fg: '#fff' },
+  close: { title: 'Близко!', bg: 'var(--sand)', fg: 'var(--ink)' },
+  miss: { title: 'Мимо', bg: 'var(--error-bg)', fg: 'var(--error)' },
+  none: { title: 'Не успели', bg: 'var(--card)', fg: 'var(--ink)' },
+}
+
+function yourAnswerText(r: PlayerReveal): string | null {
+  const v = r.you.value
+  if (!v) return null
+  const q = r.question
+  if (q.type === 'single') return `Вы выбрали: ${q.options.find((o) => o.id === v.option_id)?.text ?? '—'}`
+  if (q.type === 'number' && v.number != null) {
+    const diff = v.number - (r.correct.answer ?? 0)
+    if (diff === 0) return `Ваш ответ: ${formatNumber(v.number)}`
+    return `Ваш ответ: ${formatNumber(v.number)} — на ${formatNumber(Math.abs(diff))} ${diff > 0 ? 'больше' : 'меньше'}`
+  }
+  if (q.type === 'order' && v.order) {
+    const correct = r.correct.correct_order ?? []
+    const hits = v.order.filter((id, i) => correct[i] === id).length
+    return `На своём месте: ${hits} из ${correct.length}`
+  }
+  return null
+}
+
 function RevealView({ r }: { r: PlayerReveal }) {
-  const good = r.you.correct
+  const verdict = verdictOf(r)
+  const look = verdict === 'close' && r.question.type === 'order' ? { ...VERDICT.close, title: 'Отчасти верно' } : VERDICT[verdict]
+  const mine = yourAnswerText(r)
   return (
     <section className="stack" style={{ flex: 1, gap: 16 }}>
-      <div className="card stack" style={{ gap: 6, background: good ? 'var(--reef)' : r.you.answered ? 'var(--error-bg)' : 'var(--card)',
-        color: good ? '#fff' : r.you.answered ? 'var(--error)' : 'var(--ink)', borderColor: 'transparent' }}>
-        <span className="display" style={{ fontSize: 34 }}>
-          {good ? 'Верно!' : r.you.answered ? (r.you.points > 0 ? 'Почти!' : 'Мимо') : 'Не успели'}
-        </span>
+      <div className="card stack" style={{ gap: 6, background: look.bg, color: look.fg, borderColor: 'transparent' }}>
+        <span className="display" style={{ fontSize: 34 }}>{look.title}</span>
         <span style={{ fontSize: 22, fontWeight: 700 }}>+{formatPoints(r.you.points)} очков</span>
-        {r.you.exact && r.correct.exact_bonus && <span style={{ fontWeight: 600 }}>Точно в цель — очки удвоены</span>}
+        {verdict === 'exact' && r.correct.exact_bonus && <span style={{ fontWeight: 600 }}>Очки удвоены</span>}
+        {mine && <span style={{ fontWeight: 600 }}>{mine}</span>}
       </div>
       <div className="card stack" style={{ gap: 4 }}>
         <span className="caption">Правильный ответ</span>

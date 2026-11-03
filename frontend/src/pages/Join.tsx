@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AVATAR_COLORS, Creature, SHAPES } from '../components/Creature'
 import { Logo } from '../components/TopBar'
 import { api } from '../lib/api'
-import { load, playerKey, save, type PlayerTicket } from '../lib/storage'
+import { load, playerKey, remove, save, type PlayerTicket } from '../lib/storage'
 import type { Avatar, Shape } from '../lib/types'
 
 const AVATAR_KEY = 'qr_avatar'
@@ -20,16 +20,15 @@ export function Join() {
   )
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // Уже входили в эту комнату с этого устройства — предложим продолжить или зайти другим игроком.
+  const [existing, setExisting] = useState<PlayerTicket | null>(null)
 
   const checkPin = async (code: string) => {
     setError(null)
     setBusy(true)
     try {
       const info = await api.sessionByPin(code)
-      if (load<PlayerTicket>(playerKey(code))) {
-        navigate(`/play/${code}`)
-        return
-      }
+      setExisting(load<PlayerTicket>(playerKey(code)))
       setRoom(info)
     } catch (e) {
       setError((e as Error).message)
@@ -75,7 +74,25 @@ export function Join() {
   return (
     <main className="phone">
       <Logo />
-      {!room ? (
+      {room && existing ? (
+        <section className="stack" style={{ gap: 16, flex: 1 }}>
+          <div className="stack" style={{ gap: 4 }}>
+            <span className="muted small">«{room.title}»</span>
+            <h1 style={{ fontSize: 30 }}>Вы уже в этой игре</h1>
+            <p className="muted">С этого устройства заходили как «{existing.nickname}».</p>
+          </div>
+          <div style={{ flex: 1 }} />
+          <button type="button" className="btn btn-accent btn-lg btn-block" onClick={() => navigate(`/play/${room.pin}`)}>
+            Продолжить как {existing.nickname}
+          </button>
+          <button type="button" className="btn btn-lg btn-block" onClick={() => {
+            remove(playerKey(room.pin))
+            setExisting(null)
+          }}>
+            Войти другим игроком
+          </button>
+        </section>
+      ) : !room ? (
         <form className="stack" style={{ gap: 20, flex: 1 }} onSubmit={onPin}>
           <div className="stack" style={{ gap: 6 }}>
             <h1 style={{ fontSize: 32 }}>Введите код комнаты</h1>

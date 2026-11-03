@@ -3,12 +3,13 @@ import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { TopBar } from '../components/TopBar'
 import { useAuth } from '../lib/auth'
+import { safeNext } from '../lib/navigation'
 
 export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
   const { user, login, register } = useAuth()
   const [params] = useSearchParams()
   const navigate = useNavigate()
-  const next = params.get('next') || '/quizzes'
+  const next = safeNext(params.get('next'))
   const [email, setEmail] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')

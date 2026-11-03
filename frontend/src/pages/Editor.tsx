@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useBlocker, useNavigate, useParams } from 'react-router-dom'
 
 import { api } from '../lib/api'
 import { LETTERS, TYPE_LABELS, plural } from '../lib/format'
@@ -13,9 +13,15 @@ export function Editor() {
   const quizId = id ? Number(id) : null
   const navigate = useNavigate()
   const [title, setTitle] = useState('Новая викторина')
+  const [description, setDescription] = useState('')
+  const [isPublic, setIsPublic] = useState(false)
   const [questions, setQuestions] = useState<QuestionDraft[]>([blankQuestion()])
   const [sel, setSel] = useState(0)
   const [loading, setLoading] = useState(quizId !== null)
+  // Ошибка загрузки существующей викторины: редактор не показываем, иначе пустая
+  // заготовка могла бы перезаписать настоящие вопросы при «Сохранить».
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState<'save' | 'launch' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -23,18 +29,47 @@ export function Editor() {
   // Красные рамки — только после первой попытки сохранить, чтобы пустой вопрос не «кричал».
   const [showErrors, setShowErrors] = useState(false)
 
+  // После первого сохранения адрес меняется на /quizzes/:id/edit — перечитывать с сервера не нужно,
+  // иначе сбросится выбранный вопрос.
+  const skipNextLoad = useRef(false)
+  const revision = useRef(0)
+  const navigationAllowed = useRef(false)
+  const blocker = useBlocker(() => dirty && !navigationAllowed.current)
+
+  useEffect(() => { navigationAllowed.current = false }, [quizId])
+
   useEffect(() => {
     if (quizId === null) return
+    if (skipNextLoad.current) {
+      skipNextLoad.current = false
+      return
+    }
+    let active = true
+    setLoading(true)
+    setLoadError(null)
     api
       .getQuiz(quizId)
       .then((q) => {
+        if (!active) return
         setTitle(q.title)
+        setDescription(q.description)
+        setIsPublic(q.is_public)
         setQuestions(q.questions.length ? q.questions : [blankQuestion()])
         setSel(0)
+        setDirty(false)
       })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [quizId])
+      .catch((e: Error) => { if (active) setLoadError(e.message) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [quizId, loadAttempt])
+
+  // Браузер переспросит, если закрыть вкладку с несохранёнными правками.
+  useEffect(() => {
+    if (!dirty) return
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault()
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
 
   const problems = useMemo(() => questions.map(questionProblems), [questions])
   const badCount = problems.filter((p) => p.length).length
@@ -42,14 +77,19 @@ export function Editor() {
   const curProblems = problems[sel] ?? []
   const totalSeconds = questions.reduce((s, q) => s + q.time_limit + 10, 0)
 
-  const update = (patch: Partial<QuestionDraft>) => {
-    setQuestions((qs) => qs.map((q, i) => (i === sel ? { ...q, ...patch } : q)))
+  const markDirty = () => {
+    revision.current += 1
     setDirty(true)
     setSaved(false)
   }
+
+  const update = (patch: Partial<QuestionDraft>) => {
+    setQuestions((qs) => qs.map((q, i) => (i === sel ? { ...q, ...patch } : q)))
+    markDirty()
+  }
   const setType = (t: QType) => {
     setQuestions((qs) => qs.map((q, i) => (i === sel ? withType(q, t) : q)))
-    setDirty(true)
+    markDirty()
   }
   const setOption = (i: number, patch: Partial<QuestionDraft['options'][number]>) =>
     update({ options: cur.options.map((o, j) => (j === i ? { ...o, ...patch } : o)) })
@@ -67,7 +107,7 @@ export function Editor() {
   const addQuestion = () => {
     setQuestions((qs) => [...qs, blankQuestion()])
     setSel(questions.length)
-    setDirty(true)
+    markDirty()
   }
   const removeQuestion = () => {
     if (questions.length === 1) {
@@ -76,7 +116,7 @@ export function Editor() {
       setQuestions((qs) => qs.filter((_, i) => i !== sel))
       setSel((s) => Math.max(0, s - 1))
     }
-    setDirty(true)
+    markDirty()
   }
   const moveQuestion = (d: number) => {
     const j = sel + d
@@ -87,10 +127,12 @@ export function Editor() {
       return next
     })
     setSel(j)
-    setDirty(true)
+    markDirty()
   }
 
   const save = async (): Promise<number | null> => {
+    // Существующую викторину можно сохранять только после успешной загрузки.
+    if (quizId !== null && (loading || loadError)) return null
     setError(null)
     if (!title.trim()) {
       setError('Дайте викторине название')
@@ -103,12 +145,19 @@ export function Editor() {
       setError(`Исправьте ${badCount} ${plural(badCount, 'вопрос', 'вопроса', 'вопросов')} — они отмечены «!»`)
       return null
     }
-    const payload = { title: title.trim(), description: '', is_public: false, questions: questions.map(toPayload) }
+    const sentRevision = revision.current
+    const payload = { title: title.trim(), description, is_public: isPublic, questions: questions.map(toPayload) }
     const quiz = quizId === null ? await api.createQuiz(payload) : await api.updateQuiz(quizId, payload)
-    setDirty(false)
-    setSaved(true)
-    if (quizId === null) navigate(`/quizzes/${quiz.id}/edit`, { replace: true })
-    return quiz.id
+    const unchanged = sentRevision === revision.current
+    setDirty(!unchanged)
+    setSaved(unchanged)
+    if (quizId === null) {
+      skipNextLoad.current = true
+      navigationAllowed.current = true
+      navigate(`/quizzes/${quiz.id}/edit`, { replace: true })
+    }
+    if (!unchanged) setError('Пока шло сохранение, появились новые изменения. Сохраните их перед запуском')
+    return unchanged ? quiz.id : null
   }
 
   const onSave = async () => {
@@ -127,7 +176,15 @@ export function Editor() {
     try {
       const idToRun = dirty || quizId === null ? await save() : quizId
       if (idToRun === null) return
+      const launchedRevision = revision.current
       const { pin } = await api.createSession(idToRun)
+      if (revision.current !== launchedRevision) {
+        // Правка появилась, пока создавалась комната: не уходим молча, чтобы её не потерять.
+        // Неиспользованную комнату сервер закроет сам через несколько часов.
+        setError('Пока создавалась комната, появились новые правки. Сохраните их и запустите игру снова')
+        return
+      }
+      navigationAllowed.current = true
       navigate(`/host/${pin}`)
     } catch (e) {
       setError((e as Error).message)
@@ -137,6 +194,22 @@ export function Editor() {
   }
 
   if (loading) return <div className="container page muted">Загружаем викторину…</div>
+  if (quizId !== null && loadError) {
+    return (
+      <main className="container page" style={{ maxWidth: 560 }}>
+        <h1>Не удалось открыть викторину</h1>
+        <div role="alert" className="alert alert-error">{loadError}</div>
+        <p className="muted">Редактировать её можно только после загрузки — так ничего не сотрётся.</p>
+        <div className="row">
+          <button type="button" className="btn btn-primary" onClick={() => setLoadAttempt((n) => n + 1)}>
+            Повторить загрузку
+          </button>
+          <Link to="/quizzes" className="btn">К моим викторинам</Link>
+        </div>
+      </main>
+    )
+  }
+  const locked = busy === 'launch'
 
   const span = Math.max(1, (cur.number_max ?? 100) - (cur.number_min ?? 0))
   const pct = (v: number) => Math.max(0, Math.min(100, ((v - (cur.number_min ?? 0)) / span) * 100))
@@ -146,21 +219,34 @@ export function Editor() {
 
   return (
     <div className="container" style={{ maxWidth: 1440, paddingBottom: 48 }}>
+      {blocker.state === 'blocked' && (
+        <div role="alertdialog" aria-modal="true" aria-label="Несохранённые изменения"
+          className="leave-dialog">
+          <section className="card stack">
+            <h2>Изменения не сохранены</h2>
+            <p>Если уйти, последние правки будут потеряны.</p>
+            <div className="row">
+              <button type="button" className="btn btn-primary" autoFocus onClick={() => blocker.reset()}>Остаться</button>
+              <button type="button" className="btn" onClick={() => blocker.proceed()}>Уйти без сохранения</button>
+            </div>
+          </section>
+        </div>
+      )}
       <header className="row between" style={{ padding: '16px 0', borderBottom: '1px solid var(--line)', marginBottom: 20 }}>
         <div className="row" style={{ gap: 14 }}>
           <Link to="/quizzes" style={{ color: 'var(--ink)', fontWeight: 600, textDecoration: 'none' }}>
             ← Мои викторины
           </Link>
           <label htmlFor="quiz-title" className="sr-only">Название викторины</label>
-          <input id="quiz-title" className="input" value={title} maxLength={120}
-            onChange={(e) => { setTitle(e.target.value); setDirty(true); setSaved(false) }}
+          <input id="quiz-title" className="input" value={title} maxLength={120} disabled={locked}
+            onChange={(e) => { setTitle(e.target.value); markDirty() }}
             style={{ minWidth: 260, maxWidth: 480, fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 22 }} />
           <span className="small muted" aria-live="polite">
             {saved ? 'Сохранено' : dirty ? 'Есть несохранённые изменения' : ''}
           </span>
         </div>
         <div className="row">
-          {badCount > 0 && <span className="chip chip-error">Исправьте: {badCount}</span>}
+          {showErrors && badCount > 0 && <span className="chip chip-error">Исправьте: {badCount}</span>}
           <button type="button" className="btn" onClick={onSave} disabled={busy !== null}>
             {busy === 'save' ? 'Сохраняем…' : 'Сохранить'}
           </button>
@@ -176,6 +262,8 @@ export function Editor() {
         </div>
       )}
 
+      {/* Пока создаётся комната, правки заблокированы: иначе они потерялись бы при переходе. */}
+      <fieldset disabled={locked} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div className="row" style={{ alignItems: 'flex-start', gap: 20 }}>
         <aside className="stack" style={{ flex: '1 1 260px', maxWidth: 320, gap: 8 }}>
           <span className="caption">Вопросы · {questions.length}</span>
@@ -183,7 +271,7 @@ export function Editor() {
             <button key={i} type="button" onClick={() => setSel(i)} aria-current={i === sel} aria-label={`Вопрос ${i + 1}, ${TYPE_LABELS[q.type]}: ${q.text.trim() || "без текста"}${problems[i].length ? ", есть ошибки" : ""}`}
               className="card" style={{
                 display: 'flex', gap: 12, alignItems: 'flex-start', padding: 12, textAlign: 'left', cursor: 'pointer',
-                border: `2px solid ${i === sel ? 'var(--coral)' : problems[i].length ? '#FFB59E' : 'var(--line)'}`,
+                border: `2px solid ${i === sel ? 'var(--coral)' : showErrors && problems[i].length ? '#FFB59E' : 'var(--line)'}`,
                 font: 'inherit', color: 'inherit',
               }}>
               <span className="display" style={{ fontSize: 20, width: 22 }}>{i + 1}</span>
@@ -195,7 +283,7 @@ export function Editor() {
                   {q.text.trim() ? (q.text.length > 60 ? `${q.text.slice(0, 58)}…` : q.text) : <span className="muted">Без текста</span>}
                 </span>
               </span>
-              {problems[i].length > 0 && <span className="chip chip-error" aria-label="Есть ошибки">!</span>}
+              {showErrors && problems[i].length > 0 && <span className="chip chip-error" aria-label="Есть ошибки">!</span>}
             </button>
           ))}
           <button type="button" className="btn" style={{ borderStyle: 'dashed' }} onClick={addQuestion}
@@ -236,7 +324,7 @@ export function Editor() {
                 <div key={i} className="row" style={{ flexWrap: 'nowrap' }}>
                   <button type="button" onClick={() => markCorrect(i)} aria-pressed={o.is_correct}
                     aria-label={`Верный ответ: вариант ${LETTERS[i]}`} className="btn btn-sm"
-                    style={{ width: 44, padding: 0, background: o.is_correct ? 'var(--reef)' : undefined,
+                    style={{ width: 44, flex: '0 0 44px', padding: 0, background: o.is_correct ? 'var(--reef)' : undefined,
                       borderColor: o.is_correct ? 'var(--reef)' : 'var(--line)', color: '#fff' }}>
                     {o.is_correct ? '✓' : ''}
                   </button>
@@ -311,9 +399,9 @@ export function Editor() {
                   <label htmlFor={`item-${i}`} className="sr-only">Элемент {i + 1}</label>
                   <input id={`item-${i}`} className={`input${showErrors && !o.text.trim() ? ' invalid' : ''}`} value={o.text}
                     maxLength={200} onChange={(e) => setOption(i, { text: e.target.value })} />
-                  <button type="button" className="btn btn-sm" style={{ width: 44, padding: 0 }}
+                  <button type="button" className="btn btn-sm" style={{ width: 44, flex: '0 0 44px', padding: 0 }}
                     onClick={() => moveOption(i, -1)} disabled={i === 0} aria-label={`Выше: элемент ${i + 1}`}>↑</button>
-                  <button type="button" className="btn btn-sm" style={{ width: 44, padding: 0 }}
+                  <button type="button" className="btn btn-sm" style={{ width: 44, flex: '0 0 44px', padding: 0 }}
                     onClick={() => moveOption(i, 1)} disabled={i === cur.options.length - 1}
                     aria-label={`Ниже: элемент ${i + 1}`}>↓</button>
                   <button type="button" className="btn btn-ghost btn-sm" aria-label={`Удалить элемент ${i + 1}`}
@@ -341,16 +429,21 @@ export function Editor() {
               ))}
             </div>
           </div>
-          <div className={`card stack`} style={{
-            background: curProblems.length ? 'var(--error-bg)' : 'var(--reef-bg)', borderColor: 'transparent', gap: 6,
-          }}>
-            <span style={{ fontWeight: 700, color: curProblems.length ? 'var(--error)' : 'var(--reef-ink)' }}>
-              {curProblems.length ? 'Что поправить' : 'Вопрос готов ✓'}
-            </span>
-            {curProblems.map((p) => (
-              <span key={p} className="small" style={{ color: 'var(--error)' }}>• {p}</span>
-            ))}
-          </div>
+          {(() => {
+            // До первой попытки сохранить — спокойная подсказка, после — красный список.
+            const tone = !curProblems.length ? 'ok' : showErrors ? 'error' : 'hint'
+            const bg = { ok: 'var(--reef-bg)', error: 'var(--error-bg)', hint: 'var(--sand)' }[tone]
+            const fg = { ok: 'var(--reef-ink)', error: 'var(--error)', hint: 'var(--ink)' }[tone]
+            const title = { ok: 'Вопрос готов ✓', error: 'Что поправить', hint: 'Чтобы вопрос был готов' }[tone]
+            return (
+              <div className="card stack" style={{ background: bg, borderColor: 'transparent', gap: 6 }}>
+                <span style={{ fontWeight: 700, color: fg }}>{title}</span>
+                {curProblems.map((p) => (
+                  <span key={p} className="small" style={{ color: fg }}>• {p}</span>
+                ))}
+              </div>
+            )
+          })()}
           <div className="card card-water stack" style={{ gap: 2 }}>
             <span className="label">Вся игра</span>
             <span className="display" style={{ fontSize: 28 }}>≈ {Math.max(1, Math.round(totalSeconds / 60))} мин</span>
@@ -360,6 +453,7 @@ export function Editor() {
           </div>
         </aside>
       </div>
+      </fieldset>
     </div>
   )
 }

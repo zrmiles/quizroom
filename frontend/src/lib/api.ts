@@ -34,9 +34,10 @@ const FIELD_MESSAGES: Record<string, string> = {
 function detailToMessage(detail: unknown): string {
   if (typeof detail === 'string') return detail
   if (Array.isArray(detail) && detail.length) {
-    const first = detail[0] as { msg?: string; loc?: unknown[] }
+    const first = detail[0] as { msg?: string; loc?: unknown[]; type?: string }
     const field = String(first.loc?.[first.loc.length - 1] ?? '')
-    if (FIELD_MESSAGES[field]) return FIELD_MESSAGES[field]
+    // Свои проверки сервера (value_error) уже на русском — показываем их как есть.
+    if (first.type !== 'value_error' && FIELD_MESSAGES[field]) return FIELD_MESSAGES[field]
     return (first.msg ?? 'Проверьте поля формы').replace(/^Value error, /, '')
   }
   return 'Что-то пошло не так. Попробуйте ещё раз'
@@ -56,9 +57,19 @@ async function request<T>(path: string, init: { method?: string; body?: unknown 
   } catch {
     throw new ApiError(0, 'Нет связи с сервером. Проверьте интернет')
   }
+  if (res.status === 401 && token && getToken() === token) {
+    setToken(null)
+    window.dispatchEvent(new Event('qr:unauthorized'))
+  }
   if (res.status === 204) return undefined as T
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new ApiError(res.status, detailToMessage((data as { detail?: unknown }).detail))
+  const data = await res.json().catch(() => null)
+  if (!res.ok) {
+    if (data === null) {
+      // Ответ не JSON — отвечает не наш API (не запущен или порт занят другой программой).
+      throw new ApiError(res.status, `Сервер ответил не так, как ожидалось (код ${res.status}). Проверьте, что API запущен`)
+    }
+    throw new ApiError(res.status, detailToMessage((data as { detail?: unknown }).detail))
+  }
   return data as T
 }
 

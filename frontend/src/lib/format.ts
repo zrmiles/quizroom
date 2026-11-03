@@ -7,7 +7,7 @@ export const formatPin = (pin: string) => `${pin.slice(0, 3)} ${pin.slice(3)}`
 export const formatPoints = (n: number) => new Intl.NumberFormat('ru-RU').format(n)
 
 export function formatNumber(n: number): string {
-  return Number.isInteger(n) ? String(n) : n.toLocaleString('ru-RU', { maximumFractionDigits: 2 })
+  return Number.isInteger(n) ? String(n) : n.toLocaleString('ru-RU', { maximumSignificantDigits: 15, useGrouping: false })
 }
 
 export function plural(n: number, one: string, few: string, many: string): string {

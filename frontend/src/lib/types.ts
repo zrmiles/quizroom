@@ -99,7 +99,15 @@ export interface PlayerReveal {
   type: 'question:reveal'
   question: PublicQuestion
   correct: CorrectInfo
-  you: { answered: boolean; correct: boolean; points: number; score: number; rank: number; exact?: boolean }
+  you: {
+    answered: boolean
+    correct: boolean
+    points: number
+    score: number
+    rank: number
+    exact?: boolean
+    value?: { option_id?: number; number?: number; order?: number[] } | null
+  }
   isLast: boolean
 }
 

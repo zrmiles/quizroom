@@ -15,8 +15,8 @@ export function App() {
   return (
     <Routes>
       <Route path="/" element={<Home />} />
-      <Route path="/login" element={<AuthPage mode="login" />} />
-      <Route path="/register" element={<AuthPage mode="register" />} />
+      <Route path="/login" element={<AuthPage key="login" mode="login" />} />
+      <Route path="/register" element={<AuthPage key="register" mode="register" />} />
       <Route path="/join" element={<Join />} />
       <Route path="/play/:pin" element={<Play />} />
       <Route path="/quizzes" element={<RequireAuth><Dashboard /></RequireAuth>} />

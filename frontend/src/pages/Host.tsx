@@ -61,8 +61,11 @@ export function Host() {
             final: (msg.final as HostFinal | undefined) ?? null,
           }
         }
-        case 'lobby:update':
-          return { ...prev, players: msg.players as PublicPlayer[] }
+        case 'lobby:update': {
+          const players = msg.players as PublicPlayer[]
+          // Игрок может зайти посреди вопроса — сразу учитываем его в «из N ответили».
+          return { ...prev, players, total: prev.phase === 'question' ? players.length : prev.total }
+        }
         case 'question:start':
           return { ...prev, phase: 'question', question: msg.question as PublicQuestion, endsAt: msg.endsAt as number,
             answered: 0, total: msg.total as number, reveal: null, error: null }
@@ -103,7 +106,7 @@ export function Host() {
       <header className="row between" style={{ fontWeight: 600 }}>
         <span>{s.title || 'QuizRoom'}</span>
         <span className="row" style={{ gap: 14 }}>
-          {status !== 'open' && <span className="chip chip-sand" role="status">Переподключаемся…</span>}
+          {status === 'reconnecting' && <span className="chip chip-sand" role="status">Переподключаемся…</span>}
           {s.question && (s.phase === 'question' || s.phase === 'reveal') && (
             <span>Вопрос {s.question.index + 1} из {s.question.total}</span>
           )}
@@ -268,7 +271,7 @@ function HostRevealView({ r, onNext, onEnd }: { r: HostReveal; onNext: () => voi
         )}
         <div style={{ flex: 1 }} />
         <span className="muted">
-          Верно: {stats.correct} из {stats.total}
+          {q.type === 'number' ? 'Получили очки' : 'Верно'}: {stats.correct} из {stats.total}
           {q.type === 'order' && ' (весь порядок)'}
           {stats.answered < stats.total && ` · не успели: ${stats.total - stats.answered}`}
         </span>

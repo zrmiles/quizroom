@@ -17,7 +17,12 @@ const KIND = { single: 'О', number: 'Ч', order: 'П' } as const
 
 /** CSV с разделителем «;» и BOM — Excel на русской Windows открывает его без мастера импорта. */
 export function reportToCsv(r: Report): string {
-  const esc = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`
+  // Ячейка, начинающаяся с = + - @, в Excel станет формулой — ники пишут игроки, поэтому экранируем.
+  const esc = (v: string | number) => {
+    let s = String(v)
+    if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = `'${s}`
+    return `"${s.replace(/"/g, '""')}"`
+  }
   const head = ['Место', 'Игрок', 'Очки', 'Верно', ...r.questions.map((q) => `В${q.index + 1}`)]
   const rows = r.players.map((p) => [
     p.rank ?? '',

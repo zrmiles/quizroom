@@ -48,7 +48,7 @@ p { margin: 0; }
 :focus-visible { outline: 3px solid var(--coral); outline-offset: 2px; }
 
 .container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
-.page { padding: 24px 0 64px; display: flex; flex-direction: column; gap: 24px; }
+.page { padding-top: 24px; padding-bottom: 64px; display: flex; flex-direction: column; gap: 24px; }
 .stack { display: flex; flex-direction: column; gap: 12px; }
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .between { justify-content: space-between; }
@@ -110,7 +110,7 @@ button.chip[aria-pressed='true'] { background: var(--ink); border-color: var(--i
 .alert-ok { background: var(--reef-bg); color: var(--reef-ink); }
 
 /* ---------- шапка ---------- */
-.topbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 0; }
+.topbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding-top: 16px; padding-bottom: 16px; }
 .logo { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; color: var(--ink); }
 .logo:hover { color: var(--ink); }
 .logo-word { font-family: var(--font-display); font-weight: 700; font-size: 22px; }
@@ -182,3 +182,5 @@ input[type='range'] { width: 100%; accent-color: var(--coral); height: 36px; }
 
 .empty { text-align: center; padding: 40px 20px; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 50; max-width: calc(100% - 32px); }
+.leave-dialog { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(11, 42, 58, 0.5); }
+.leave-dialog > section { max-width: 520px; }
