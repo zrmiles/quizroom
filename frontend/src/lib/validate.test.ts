@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import { remainingMs } from '../components/Timer'
 import { fishPosition, formatPin, histogram, plural } from './format'
+import { reportToCsv } from '../pages/Report'
+import type { Report } from './types'
 import { blankQuestion, questionProblems, toPayload, withType } from './validate'
 
 describe('questionProblems', () => {
@@ -81,5 +83,22 @@ describe('таймер', () => {
     // Сервер «спешит» на 2 с: до конца остаётся на 2 с меньше.
     expect(remainingMs(10_000, 2_000, 0)).toBe(8_000)
     expect(remainingMs(10_000, 0, 20_000)).toBe(0)
+  })
+})
+
+describe('аудит', () => {
+  it('бесконечное число в шкале — ошибка ввода, а не отправка null', () => {
+    const q = { ...withType(blankQuestion('single'), 'number'), text: 'Год?', number_max: Infinity }
+    expect(questionProblems(q)).toContain('Заполните ответ, шкалу и допуск')
+  })
+
+  it('выгрузка для Excel не превращает ники в формулы', () => {
+    const report = {
+      questions: [{ index: 0 }],
+      players: [{ rank: 1, nickname: '=HYPERLINK("http://evil")', score: 10, correct: 1, cells: [{ state: 'fast' }] }],
+    } as unknown as Report
+    const csv = reportToCsv(report)
+    expect(csv).toContain(`"'=HYPERLINK(""http://evil"")"`)
+    expect(csv).not.toMatch(/;"=HYPERLINK/)
   })
 })
