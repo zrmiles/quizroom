@@ -4,20 +4,20 @@ version = "0.1.0"
 description = "QuizRoom — API и игровой движок онлайн-викторин"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi==0.115.6",
+    "fastapi==0.162.0",
     "uvicorn[standard]==0.32.1",
     "sqlalchemy[asyncio]==2.0.36",
     "asyncpg==0.30.0",
     "aiosqlite==0.20.0",
     "pydantic-settings==2.6.1",
     "email-validator==2.2.0",
-    "pyjwt==2.10.1",
+    "pyjwt==2.15.1",
     "bcrypt==4.2.1",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest==8.3.4",
+    "pytest==9.2.0",
     "pytest-timeout==2.3.1",
     "httpx==0.28.1",
     "ruff==0.8.4",

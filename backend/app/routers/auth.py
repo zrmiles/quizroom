@@ -1,5 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from anyio import to_thread
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -12,21 +14,31 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=TokenOut, status_code=status.HTTP_201_CREATED)
-async def register(data: RegisterIn, db: AsyncSession = Depends(get_db)) -> TokenOut:
+async def register(data: RegisterIn, request: Request, db: AsyncSession = Depends(get_db)) -> TokenOut:
+    request.app.state.auth_rate_limit.check(request, "register")
     email = data.email.lower()
     exists = await db.scalar(select(User.id).where(User.email == email))
     if exists:
         raise HTTPException(status.HTTP_409_CONFLICT, "Этот email уже зарегистрирован")
-    user = User(email=email, username=data.username.strip(), password_hash=hash_password(data.password))
+    password_hash = await to_thread.run_sync(hash_password, data.password, limiter=request.app.state.password_limiter)
+    user = User(email=email, username=data.username.strip(), password_hash=password_hash)
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Этот email уже зарегистрирован") from e
     return TokenOut(access_token=create_access_token(user.id), user=UserOut.model_validate(user))
 
 
 @router.post("/login", response_model=TokenOut)
-async def login(data: LoginIn, db: AsyncSession = Depends(get_db)) -> TokenOut:
+async def login(data: LoginIn, request: Request, db: AsyncSession = Depends(get_db)) -> TokenOut:
+    request.app.state.auth_rate_limit.check(request, "login")
     user = await db.scalar(select(User).where(User.email == data.email.lower()))
-    if user is None or not verify_password(data.password, user.password_hash):
+    valid = user is not None and await to_thread.run_sync(
+        verify_password, data.password, user.password_hash, limiter=request.app.state.password_limiter
+    )
+    if not valid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный email или пароль")
     return TokenOut(access_token=create_access_token(user.id), user=UserOut.model_validate(user))
 
