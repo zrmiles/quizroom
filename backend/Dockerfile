@@ -11,4 +11,5 @@ COPY app ./app
 
 EXPOSE 8000
 # Один воркер: состояние игровых комнат пока хранится в памяти процесса.
-CMD ["/app/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# API не публикует порт наружу; Nginx перезаписывает X-Forwarded-For адресом клиента.
+CMD ["/app/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--ws-max-size", "65536", "--proxy-headers", "--forwarded-allow-ips", "*"]

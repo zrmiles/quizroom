@@ -8,6 +8,23 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        database: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quizroom_test
+          POSTGRES_USER: quizroom_test
+          POSTGRES_PASSWORD: test-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U quizroom_test -d quizroom_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      TEST_DATABASE_URL: ${{ matrix.database == 'postgres' && 'postgresql+asyncpg://quizroom_test:test-only-password@127.0.0.1:5432/quizroom_test' || '' }}
     defaults:
       run:
         working-directory: backend
@@ -46,4 +63,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Сборка образов
+        env:
+          JWT_SECRET: ci-only-not-a-secret
         run: docker compose build

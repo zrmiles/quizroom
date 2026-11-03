@@ -17,7 +17,7 @@ services:
     build: ./backend
     environment:
       DATABASE_URL: postgresql+asyncpg://quizroom:${POSTGRES_PASSWORD:-quizroom}@db:5432/quizroom
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:?Задайте JWT_SECRET в файле .env — см. .env.example}
       CORS_ORIGINS: '["http://localhost:8080"]'
     depends_on:
       db:
