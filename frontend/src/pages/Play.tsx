@@ -193,10 +193,25 @@ export function QuestionView({ q, endsAt, offsetRef, answered, pending = false, 
   const max = q.max ?? 100
   const step = Math.max(Number.MIN_VALUE, 10 ** Math.floor(Math.log10((max - min) / 100)))
   const clamp = (v: number) => Math.min(max, Math.max(min, Number(v.toPrecision(15))))
-  const [guessText, setGuessText] = useState(() => String(clamp(min + (max - min) / 2)))
+  // После переподключения показываем то, что сервер уже принял, а не значения по умолчанию.
+  const accepted = myChoice as { number?: number; order?: number[] } | null
+  const acceptedOrder = (ids: number[] | undefined) => {
+    if (!ids) return null
+    const byId = new Map(q.options.map((o) => [o.id, o]))
+    const items = ids.map((id) => byId.get(id))
+    return items.length === q.options.length && items.every(Boolean) ? (items as typeof q.options) : null
+  }
+  const [guessText, setGuessText] = useState(() =>
+    typeof accepted?.number === 'number' ? String(accepted.number) : String(clamp(min + (max - min) / 2)))
   const guess = guessText.trim() ? Number(guessText) : NaN
   const validGuess = Number.isFinite(guess) && guess >= min && guess <= max
-  const [order, setOrder] = useState(q.options)
+  const [order, setOrder] = useState(() => acceptedOrder(accepted?.order) ?? q.options)
+  useEffect(() => {
+    if (typeof accepted?.number === 'number') setGuessText(String(accepted.number))
+    const restoredOrder = acceptedOrder(accepted?.order)
+    if (restoredOrder) setOrder(restoredOrder)
+    // Пересчитываем только при новом принятом ответе.
+  }, [myChoice])
   const bigStep = step * 10
   const chosen = (myChoice as { option_id?: number } | null)?.option_id
   // Как только на таймере 0 — ответ уже не примут, поэтому сразу блокируем ввод.

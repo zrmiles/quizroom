@@ -84,9 +84,13 @@ export function Host() {
   }, [])
 
   const { status, deniedReason, send, offsetRef } = useGameSocket(pin, 'host', getToken(), onMessage)
+  const online = status === 'open'
   const cmd = (type: string, extra: Record<string, unknown> = {}) => {
-    setS((p) => ({ ...p, error: null }))
-    send({ type, ...extra })
+    const sent = send({ type, ...extra })
+    setS((p) => ({
+      ...p,
+      error: sent ? null : 'Нет связи с комнатой — команда не отправлена. Нажмите ещё раз, когда связь восстановится',
+    }))
   }
 
   if (status === 'denied') {
@@ -129,7 +133,7 @@ export function Host() {
               <span>В аквариуме</span>
               <span className="display">{s.players.length}</span>
             </div>
-            <button type="button" className="btn btn-accent btn-lg" disabled={!s.players.length}
+            <button type="button" className="btn btn-accent btn-lg" disabled={!s.players.length || !online}
               onClick={() => cmd('host:start')}>
               Начать игру
             </button>
@@ -144,7 +148,7 @@ export function Host() {
             )}
             {s.players.map((p) => (
               <button key={p.id} type="button" className={`fish${p.connected ? '' : ' offline'}`} style={fishPosition(p.id)}
-                aria-label={`Удалить игрока ${p.nickname}`}
+                aria-label={`Удалить игрока ${p.nickname}`} disabled={!online}
                 onClick={() => window.confirm(`Удалить «${p.nickname}» из комнаты?`) && cmd('host:kick', { player_id: p.id })}>
                 <Creature avatar={p.avatar} size={72} jump={waving.has(p.id)} />
                 <span className="name">{p.nickname}</span>
@@ -180,13 +184,15 @@ export function Host() {
             <span className="display" style={{ fontSize: 28 }}>
               {s.answered} <span className="muted" style={{ fontSize: 20 }}>из {s.total} ответили</span>
             </span>
-            <button type="button" className="btn" onClick={() => cmd('host:skip')}>Закрыть вопрос</button>
+            <button type="button" className="btn" disabled={!online}
+              onClick={() => cmd('host:skip', { questionIndex: s.question!.index })}>Закрыть вопрос</button>
           </div>
         </section>
       )}
 
       {s.phase === 'reveal' && s.reveal && (
-        <HostRevealView r={s.reveal} onNext={() => cmd('host:next')} onEnd={() => cmd('host:end')} />
+        <HostRevealView r={s.reveal} disabled={!online}
+          onNext={() => cmd('host:next', { questionIndex: s.reveal!.question.index })} onEnd={() => cmd('host:end')} />
       )}
 
       {s.phase === 'finished' && s.final && (
@@ -236,7 +242,9 @@ function Podium({ players }: { players: PublicPlayer[] }) {
   )
 }
 
-function HostRevealView({ r, onNext, onEnd }: { r: HostReveal; onNext: () => void; onEnd: () => void }) {
+function HostRevealView({ r, onNext, onEnd, disabled }: {
+  r: HostReveal; onNext: () => void; onEnd: () => void; disabled: boolean
+}) {
   const q = r.question
   const { stats } = r
   return (
@@ -291,11 +299,11 @@ function HostRevealView({ r, onNext, onEnd }: { r: HostReveal; onNext: () => voi
           ))}
         </ol>
         <div style={{ flex: 1 }} />
-        <button type="button" className="btn btn-accent btn-lg" onClick={onNext}>
+        <button type="button" className="btn btn-accent btn-lg" onClick={onNext} disabled={disabled}>
           {r.isLast ? 'Показать итоги' : 'Следующий вопрос'}
         </button>
         {!r.isLast && (
-          <button type="button" className="btn btn-ghost btn-sm"
+          <button type="button" className="btn btn-ghost btn-sm" disabled={disabled}
             onClick={() => window.confirm('Закончить игру сейчас?') && onEnd()}>
             Закончить досрочно
           </button>
