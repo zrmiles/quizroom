@@ -108,6 +108,7 @@ button.chip[aria-pressed='true'] { background: var(--ink); border-color: var(--i
 .alert { padding: 12px 14px; border-radius: var(--r-ctl); font-size: 14px; font-weight: 600; }
 .alert-error { background: var(--error-bg); color: var(--error); }
 .alert-ok { background: var(--reef-bg); color: var(--reef-ink); }
+.alert-info { background: var(--water); color: var(--ink); }
 
 /* ---------- шапка ---------- */
 .topbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding-top: 16px; padding-bottom: 16px; }
