@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+/** `open` — сервер принял вход и прислал состояние игры; до этого команды не отправляются. */
 export type SocketStatus = 'connecting' | 'open' | 'reconnecting' | 'denied'
 
 // Коды закрытия, после которых переподключаться бессмысленно.
@@ -30,6 +31,7 @@ export function useGameSocket(pin: string, role: 'host' | 'player', token: strin
   const [status, setStatus] = useState<SocketStatus>('connecting')
   const [deniedReason, setDeniedReason] = useState<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
+  const readyRef = useRef(false)
   const handlerRef = useRef(onMessage)
   const offsetRef = useRef(0)
   handlerRef.current = onMessage
@@ -47,12 +49,12 @@ export function useGameSocket(pin: string, role: 'host' | 'player', token: strin
       // Токен — первым сообщением, а не в адресе: адреса попадают в логи сервера и прокси.
       const ws = new WebSocket(`${proto}://${window.location.host}/ws/game/${pin}`)
       wsRef.current = ws
+      readyRef.current = false
       ws.onopen = () => {
         clearTimeout(stableTimer)
         stableTimer = setTimeout(() => { attempt = 0 }, STABLE_CONNECTION_MS)
         lastError = null
         ws.send(JSON.stringify({ type: 'auth', role, token }))
-        setStatus('open')
       }
       ws.onmessage = (ev) => {
         let msg: GameMessage
@@ -63,10 +65,15 @@ export function useGameSocket(pin: string, role: 'host' | 'player', token: strin
         }
         if (typeof msg.serverNow === 'number') offsetRef.current = msg.serverNow - Date.now()
         if (msg.type === 'error') lastError = String(msg.message)
+        if (msg.type === 'state:snapshot' && wsRef.current === ws && !readyRef.current) {
+          readyRef.current = true
+          setStatus('open')
+        }
         handlerRef.current(msg)
       }
       ws.onclose = (ev) => {
         clearTimeout(stableTimer)
+        if (wsRef.current === ws) readyRef.current = false
         if (stopped) return
         if (FINAL_CODES.has(ev.code)) {
           setDeniedReason(ev.code === 4001 ? 'Ведущий удалил вас из комнаты' : lastError)
@@ -90,7 +97,7 @@ export function useGameSocket(pin: string, role: 'host' | 'player', token: strin
 
   const send = useCallback((msg: Record<string, unknown>) => {
     const ws = wsRef.current
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN && readyRef.current) {
       ws.send(JSON.stringify(msg))
       return true
     }

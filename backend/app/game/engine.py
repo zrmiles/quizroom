@@ -386,6 +386,9 @@ class Room:
                 await self._send(ws, {"type": "error", "message": "Что-то пошло не так на сервере. Попробуйте ещё раз"})
 
     async def _handle_host(self, kind: Any, msg: dict[str, Any]) -> None:
+        target = msg.get("questionIndex")
+        if kind in ("host:next", "host:skip") and target is not None and target != self.index:
+            return  # нажатие относилось к уже прошедшему вопросу
         if kind == "host:start":
             if self.state != LOBBY:
                 raise GameError("Игра уже идёт")
