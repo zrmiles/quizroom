@@ -6,11 +6,12 @@ import { RouterProvider, createMemoryRouter } from 'react-router-dom'
 
 import { Editor } from '../pages/Editor'
 import { ApiError, api } from './api'
+import { clearDrafts } from './draft'
 import type { Quiz } from './types'
 import { reconnectDelay, useGameSocket } from './useGameSocket'
 import { blankQuestion } from './validate'
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); clearDrafts() })
 
 const quiz: Quiz = {
   id: 2, title: 'Существующая', description: 'Описание', is_public: true, updated_at: '',

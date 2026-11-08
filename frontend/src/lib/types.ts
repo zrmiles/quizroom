@@ -136,7 +136,7 @@ export interface SessionHistoryItem {
   parent_session_id: number | null
 }
 
-export type CellState = 'fast' | 'slow' | 'wrong' | 'none'
+export type CellState = 'fast' | 'slow' | 'wrong' | 'none' | 'absent' | 'unshown'
 
 export interface Report {
   session: {
@@ -150,12 +150,27 @@ export interface Report {
     question_count: number
   }
   summary: {
-    avg_correct_rate: number
+    shown_count: number
+    ended_early: boolean
+    /** Доля верных по показанным вопросам; null — никто не мог ответить. */
+    avg_correct_rate: number | null
     hardest_index: number | null
     avg_response_ms: number | null
     finished_count: number
+    /** Вопрос «трудный» и попадает в повтор, если доля верных меньше этого порога. */
+    hard_rate: number
+    retry_count: number
   }
-  questions: { index: number; type: QType; text: string; correct_rate: number; answered: number; avg_ms: number | null }[]
+  questions: {
+    index: number
+    type: QType
+    text: string
+    shown: boolean
+    eligible: number
+    correct_rate: number | null
+    answered: number
+    avg_ms: number | null
+  }[]
   players: {
     id: number
     nickname: string
@@ -164,6 +179,8 @@ export interface Report {
     rank: number | null
     reconnects: number
     correct: number
+    /** Сколько показанных вопросов игрок мог ответить. */
+    asked: number
     skipped: number
     cells: { state: CellState; points: number }[]
   }[]

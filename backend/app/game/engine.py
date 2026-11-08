@@ -35,6 +35,8 @@ OUTBOX_LIMIT = 256
 WAVE_COOLDOWN_MS = 1000  # «Помахать» — не чаще раза в секунду
 FINISHED_ROOM_TTL_S = 30 * 60  # закончившуюся комнату держим полчаса (переподключиться к итогам)
 IDLE_ROOM_TTL_S = 3 * 60 * 60  # брошенную комнату закрываем через 3 часа без действий
+# Сколько ждём игрока с оборванной связью, прежде чем закрыть вопрос досрочно без него.
+RECONNECT_GRACE_MS = 8000
 
 
 def now_ms() -> int:
@@ -52,6 +54,8 @@ class PlayerState:
     # Переподключения во время игры (в лобби — не считаем: это не проблема связи).
     reconnects: int = 0
     last_wave_ms: int = 0
+    # Когда закрылось последнее соединение игрока (0 — подключён или ещё не подключался).
+    disconnected_at_ms: int = 0
     sockets: set[WebSocket] = field(default_factory=set)
     answers: dict[int, dict[str, Any]] = field(default_factory=dict)
 
@@ -98,9 +102,13 @@ class Room:
         self.senders: dict[WebSocket, asyncio.Task[None]] = {}
         self.closers: set[asyncio.Task[None]] = set()
         self.timer: asyncio.Task[None] | None = None
+        # Отложенные проверки «можно ли закрыть вопрос», когда истекает ожидание переподключения.
+        self.rechecks: set[asyncio.Task[None]] = set()
         self.lock = asyncio.Lock()
         # Для «по порядку» игроки видят элементы перемешанными — одинаково для всех.
         self.shuffles: dict[int, list[dict[str, Any]]] = {}
+        # Кто мог ответить на каждый показанный вопрос: игроки на момент показа и вошедшие во время него.
+        self.eligible: dict[int, list[int]] = {}
         for i, q in enumerate(questions):
             if q["type"] == "order":
                 self.shuffles[i] = _shuffle_not_identity([{"id": o["id"], "text": o["text"]} for o in q["options"]])
@@ -110,6 +118,8 @@ class Room:
     def add_player(self, player_id: int, nickname: str, avatar: dict[str, Any], token: str) -> PlayerState:
         st = PlayerState(id=player_id, nickname=nickname, avatar=avatar, token=token)
         self.players[player_id] = st
+        if self.state == QUESTION:
+            self.eligible.setdefault(self.index, []).append(player_id)
         return st
 
     def nickname_taken(self, nickname: str) -> bool:
@@ -130,14 +140,17 @@ class Room:
                 player.reconnects += 1
             player.sockets.add(ws)
             player.connections += 1
+            player.disconnected_at_ms = 0
         self._outbox(ws, player)
         self.touch()
 
     def detach(self, ws: WebSocket, player: PlayerState | None) -> None:
         if player is None:
             self.host_sockets.discard(ws)
-        else:
+        elif ws in player.sockets:
             player.sockets.discard(ws)
+            if not player.sockets:
+                player.disconnected_at_ms = now_ms()
         self.outboxes.pop(ws, None)
         task = self.senders.pop(ws, None)
         if task and task is not asyncio.current_task():
@@ -386,6 +399,9 @@ class Room:
                 await self._send(ws, {"type": "error", "message": "Что-то пошло не так на сервере. Попробуйте ещё раз"})
 
     async def _handle_host(self, kind: Any, msg: dict[str, Any]) -> None:
+        target = msg.get("questionIndex")
+        if kind in ("host:next", "host:skip") and target is not None and target != self.index:
+            return  # нажатие относилось к уже прошедшему вопросу
         if kind == "host:start":
             if self.state != LOBBY:
                 raise GameError("Игра уже идёт")
@@ -429,6 +445,7 @@ class Room:
         self._cancel_timer()
         self.index = i
         self.state = QUESTION
+        self.eligible[i] = list(self.players)
         self.started_at_ms = now_ms()
         self.ends_at_ms = self.started_at_ms + self.questions[i]["time_limit"] * 1000
         msg = {
@@ -480,9 +497,7 @@ class Room:
         await self._ack(p)
         answered = sum(1 for pl in self.players.values() if self.index in pl.answers)
         await self._to_hosts({"type": "question:progress", "answered": answered, "total": len(self.players)})
-        waiting = [pl for pl in self.players.values() if pl.connected and self.index not in pl.answers]
-        if not waiting:
-            await self._close_question()
+        await self._close_if_nobody_left()
 
     async def _ack(self, p: PlayerState) -> None:
         await self._to_player(
@@ -490,13 +505,39 @@ class Room:
         )
 
     async def after_disconnect(self) -> None:
-        """Если ушёл единственный, кого ждали, — не держим остальных до конца таймера."""
+        """Ушедшего игрока ждём RECONNECT_GRACE_MS: короткий обрыв связи не должен стоить ему ответа."""
         async with self.lock:
             if self.state != QUESTION:
                 return
-            connected = [p for p in self.players.values() if p.connected]
-            if connected and all(self.index in p.answers for p in connected):
-                await self._close_question()
+            await self._close_if_nobody_left()
+            if self.state == QUESTION:
+                task = asyncio.create_task(self._recheck_after(self.index, RECONNECT_GRACE_MS / 1000))
+                self.rechecks.add(task)
+                task.add_done_callback(self.rechecks.discard)
+
+    async def _recheck_after(self, i: int, delay_s: float) -> None:
+        await asyncio.sleep(delay_s)
+        async with self.lock:
+            if self.state == QUESTION and self.index == i:
+                await self._close_if_nobody_left()
+
+    def _awaited(self, p: PlayerState, now: int) -> bool:
+        """Ждём ответа от подключённых и от тех, кто отключился совсем недавно."""
+        if p.connected:
+            return True
+        return p.disconnected_at_ms > 0 and now - p.disconnected_at_ms < RECONNECT_GRACE_MS
+
+    async def _close_if_nobody_left(self) -> None:
+        """Закрыть вопрос досрочно, если ответили все, кого ещё есть смысл ждать.
+
+        Если связь пропала у всех сразу (например, у класса упал Wi-Fi), вопрос идёт до таймера.
+        """
+        now = now_ms()
+        if not any(p.connected for p in self.players.values()):
+            return
+        waiting = [p for p in self.players.values() if self.index not in p.answers and self._awaited(p, now)]
+        if not waiting:
+            await self._close_question()
 
     async def _close_question(self) -> None:
         if self.state != QUESTION:
@@ -543,6 +584,8 @@ class Room:
     async def shutdown(self, reason: str) -> None:
         """Закрыть комнату для всех: викторину удалили или комната брошена."""
         self._cancel_timer()
+        for task in list(self.rechecks):
+            task.cancel()
         self.state = FINISHED
         sockets = list(self.outboxes)
         tasks = list(self.senders.values())
@@ -564,6 +607,16 @@ class Room:
         await asyncio.gather(*(close(ws) for ws in sockets))
         await asyncio.gather(*list(self.closers), return_exceptions=True)
 
+    def played_snapshot(self) -> list[dict[str, Any]]:
+        """Снимок вопросов с отметкой, что реально показывали и кто мог ответить — для честного отчёта."""
+        out = []
+        for i, q in enumerate(self.questions):
+            if i in self.eligible:
+                out.append({**q, "eligible": [pid for pid in self.eligible[i] if pid in self.players]})
+            else:
+                out.append({**q, "shown": False})
+        return out
+
     # ---------- база ----------
 
     async def _mark_started(self) -> None:
@@ -581,6 +634,7 @@ class Room:
                 if gs is None:
                     raise GameError("Игра удалена, сохранить итоги нельзя")
                 gs.status = "finished"
+                gs.snapshot = self.played_snapshot()
                 if gs.finished_at is None:  # повтор сохранения не переписывает историю
                     gs.finished_at = datetime.now(UTC)
                 ranks = {r["id"]: r["rank"] for r in self.leaderboard()}

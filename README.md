@@ -107,7 +107,7 @@ cd backend && PORT=8000 uv run python scripts/live_scenarios.py
 
 Первым сообщением клиент присылает `{"type": "auth", "role": "host" | "player", "token": "…"}` — токен не передаётся в адресе, чтобы не попадать в логи сервера и прокси.
 
-- Ведущий → сервер: `host:start`, `host:next`, `host:skip`, `host:end`, `host:kick`
+- Ведущий → сервер: `host:start`, `host:next`, `host:skip`, `host:end`, `host:kick` (`host:next` и `host:skip` передают `questionIndex`, чтобы запоздавшее нажатие не задело следующий вопрос)
 - Игрок → сервер: `player:answer {questionIndex, value}`, `player:wave`
 - Сервер → клиенты: `state:snapshot`, `lobby:update`, `lobby:wave`, `question:start`, `question:progress`, `answer:ack`, `question:reveal`, `game:finished`, `error`
 

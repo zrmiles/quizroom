@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { Navigate, useLocation } from 'react-router-dom'
 
 import { ApiError, api, getToken, setToken } from './api'
+import { clearDrafts } from './draft'
 import type { User } from './types'
 
 interface AuthValue {
@@ -75,6 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     restoreEpoch.current += 1
+    clearDrafts()
     setToken(null)
     setUser(null)
     setRestoreError(null)
@@ -83,6 +85,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo(() => ({ user, ready, restoreError, retryRestore, login, register, logout }),
     [user, ready, restoreError, retryRestore, login, register, logout])
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+/** Текущий пользователь или null — без ошибки вне AuthProvider (нужно редактору в тестах). */
+export function useCurrentUser(): User | null {
+  return useContext(AuthContext)?.user ?? null
 }
 
 export function useAuth(): AuthValue {
