@@ -1,12 +1,18 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
+from fastapi import Path
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StrictInt, TypeAdapter, field_validator, model_validator
 
 QuestionType = Literal["single", "number", "order"]
 Shape = Literal["round", "blob", "box"]
 
 AVATAR_COLORS = {"#FF7A59", "#FFD23F", "#5BD9A0", "#9B8CFF", "#4CC9F0", "#FF8FC7"}
+
+# ID строк в БД: в PostgreSQL это 32-битный INTEGER. Слишком большой ID — 422/404, а не ошибка 500.
+MAX_DB_ID = 2**31 - 1
+DbId = Annotated[int, Field(ge=1, le=MAX_DB_ID)]
+DbIdPath = Annotated[int, Path(ge=1, le=MAX_DB_ID)]
 
 # Конечное число разумного размера: Infinity/NaN ломают JSON-ответ и сохраняют «битую» викторину.
 FiniteNumber = Annotated[float, Field(allow_inf_nan=False, ge=-1e12, le=1e12)]
@@ -92,6 +98,11 @@ class QuestionIn(BaseModel):
     number_tolerance: FiniteNumber | None = None
     number_exact_bonus: bool = False
 
+    def _check_distinct(self, message: str) -> None:
+        seen = {" ".join(o.text.split()).casefold() for o in self.options}
+        if len(seen) != len(self.options):
+            raise ValueError(message)
+
     @model_validator(mode="after")
     def check_by_type(self) -> "QuestionIn":
         self.text = self.text.strip()
@@ -102,6 +113,7 @@ class QuestionIn(BaseModel):
                 raise ValueError("Нужно от 2 до 4 вариантов")
             if sum(o.is_correct for o in self.options) != 1:
                 raise ValueError("Отметьте ровно один верный вариант")
+            self._check_distinct("Варианты ответа не должны повторяться")
         elif self.type == "number":
             vals = (self.number_answer, self.number_min, self.number_max, self.number_tolerance)
             if any(v is None for v in vals):
@@ -116,6 +128,7 @@ class QuestionIn(BaseModel):
         elif self.type == "order":
             if not 3 <= len(self.options) <= 6:
                 raise ValueError("Нужно от 3 до 6 элементов")
+            self._check_distinct("Элементы не должны повторяться — иначе порядок не определить")
             for o in self.options:
                 o.is_correct = False
         return self
@@ -126,6 +139,9 @@ class QuizIn(BaseModel):
     description: str = Field(default="", max_length=1000)
     is_public: bool = False
     questions: list[QuestionIn] = Field(default=[], max_length=50)
+    # updated_at той версии, которую правил клиент. Если викторину успели изменить
+    # в другой вкладке, сервер ответит 409 и не затрёт чужие правки. None — без проверки.
+    base_updated_at: datetime | None = None
 
     @field_validator("title")
     @classmethod
@@ -192,7 +208,7 @@ class Avatar(BaseModel):
 
 
 class SessionCreateIn(BaseModel):
-    quiz_id: int
+    quiz_id: DbId
 
 
 class SessionCreatedOut(BaseModel):

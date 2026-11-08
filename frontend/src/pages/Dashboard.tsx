@@ -20,15 +20,16 @@ export function Dashboard() {
   const [quizzes, setQuizzes] = useState<QuizSummary[] | null>(null)
   const [history, setHistory] = useState<SessionHistoryItem[]>([])
   const [error, setError] = useState<string | null>(null)
+  // Ошибки загрузки списков — отдельно: сбой истории не должен прятать викторины, и наоборот.
+  const [quizzesError, setQuizzesError] = useState<string | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<number | null>(null)
 
   const reload = useCallback(() => {
-    Promise.all([api.listQuizzes(), api.history()])
-      .then(([q, h]) => {
-        setQuizzes(q)
-        setHistory(h)
-      })
-      .catch((e: Error) => setError(e.message))
+    setQuizzesError(null)
+    setHistoryError(null)
+    api.listQuizzes().then(setQuizzes).catch((e: Error) => setQuizzesError(e.message))
+    api.history().then(setHistory).catch((e: Error) => setHistoryError(e.message))
   }, [])
 
   useEffect(reload, [reload])
@@ -75,7 +76,12 @@ export function Dashboard() {
           </div>
         )}
 
-        {quizzes === null ? (
+        {quizzesError ? (
+          <div role="alert" className="alert alert-error row between">
+            <span>Не удалось загрузить викторины: {quizzesError}</span>
+            <button type="button" className="btn btn-sm" onClick={reload}>Повторить</button>
+          </div>
+        ) : quizzes === null ? (
           <p className="muted">Загружаем…</p>
         ) : quizzes.length === 0 ? (
           <div className="card empty stack" style={{ alignItems: 'center' }}>
@@ -94,7 +100,7 @@ export function Dashboard() {
                   </span>
                 </div>
                 <div className="row">
-                  <button type="button" className="btn btn-accent btn-sm" disabled={!q.question_count || busyId === q.id}
+                  <button type="button" className="btn btn-accent btn-sm" disabled={!q.question_count || busyId !== null}
                     onClick={() => launch(q.id)}>
                     {busyId === q.id ? 'Открываем…' : 'Запустить'}
                   </button>
@@ -107,6 +113,13 @@ export function Dashboard() {
                 </div>
               </article>
             ))}
+          </div>
+        )}
+
+        {historyError && (
+          <div role="alert" className="alert alert-error row between">
+            <span>Не удалось загрузить историю игр: {historyError}</span>
+            <button type="button" className="btn btn-sm" onClick={reload}>Повторить</button>
           </div>
         )}
 

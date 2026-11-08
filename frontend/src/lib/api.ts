@@ -83,6 +83,8 @@ export interface QuizPayload {
   description: string
   is_public: boolean
   questions: QuestionDraft[]
+  /** updated_at версии, которую правили; сервер ответит 409, если её успели изменить. */
+  base_updated_at?: string | null
 }
 
 export const api = {

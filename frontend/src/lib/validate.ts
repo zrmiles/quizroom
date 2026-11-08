@@ -1,6 +1,12 @@
 import type { QType, QuestionDraft } from './types'
 
 /** Та же проверка, что на сервере (backend/app/schemas.py), — чтобы ошибки были видны до сохранения. */
+const sameText = (a: string) => a.split(/\s+/).filter(Boolean).join(' ').toLocaleLowerCase('ru')
+const hasDuplicates = (q: QuestionDraft) => {
+  const texts = q.options.map((o) => sameText(o.text)).filter(Boolean)
+  return new Set(texts).size !== texts.length
+}
+
 export function questionProblems(q: QuestionDraft): string[] {
   const p: string[] = []
   if (!q.text.trim()) p.push('Добавьте текст вопроса')
@@ -10,6 +16,7 @@ export function questionProblems(q: QuestionDraft): string[] {
     if (q.options.some((o) => !o.text.trim())) p.push('Заполните или удалите пустые варианты')
     const correct = q.options.filter((o) => o.is_correct)
     if (correct.length !== 1 || !correct[0].text.trim()) p.push('Отметьте верный вариант')
+    if (hasDuplicates(q)) p.push('Варианты ответа не должны повторяться')
   }
   if (q.type === 'number') {
     const { number_answer: a, number_min: lo, number_max: hi, number_tolerance: tol } = q
@@ -24,6 +31,7 @@ export function questionProblems(q: QuestionDraft): string[] {
   if (q.type === 'order') {
     if (q.options.length < 3) p.push('Нужно хотя бы три элемента')
     if (q.options.some((o) => !o.text.trim())) p.push('Заполните или удалите пустые элементы')
+    if (hasDuplicates(q)) p.push('Элементы не должны повторяться — иначе порядок не определить')
   }
   return p
 }

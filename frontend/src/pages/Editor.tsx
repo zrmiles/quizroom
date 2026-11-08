@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useBlocker, useNavigate, useParams } from 'react-router-dom'
 
-import { api } from '../lib/api'
+import { ApiError, api } from '../lib/api'
 import { useCurrentUser } from '../lib/auth'
 import { draftKey, loadDraft, removeDraft, saveDraft, type EditorDraft } from '../lib/draft'
 import { LETTERS, TYPE_LABELS, plural } from '../lib/format'
@@ -39,6 +39,9 @@ export function Editor() {
   // иначе сбросится выбранный вопрос.
   const skipNextLoad = useRef(false)
   const revision = useRef(0)
+  // Версия викторины на сервере, от которой идут правки (updated_at): защита от записи поверх другой вкладки.
+  const version = useRef<string | null>(null)
+  const [conflict, setConflict] = useState(false)
   const navigationAllowed = useRef(false)
   const blocker = useBlocker(() => dirty && !navigationAllowed.current)
 
@@ -89,6 +92,8 @@ export function Editor() {
         setSel(0)
         setDirty(false)
         setRestored(false)
+        setConflict(false)
+        version.current = q.updated_at
         const d = loadDraft(key)
         if (d) applyDraft(d)
       })
@@ -164,7 +169,8 @@ export function Editor() {
     markDirty()
   }
 
-  const save = async (): Promise<number | null> => {
+  /** `force` — сохранить поверх версии, которую успели изменить в другой вкладке. */
+  const save = async (force = false): Promise<number | null> => {
     // Существующую викторину можно сохранять только после успешной загрузки.
     if (quizId !== null && (loading || loadError)) return null
     setError(null)
@@ -181,7 +187,20 @@ export function Editor() {
     }
     const sentRevision = revision.current
     const payload = { title: title.trim(), description, is_public: isPublic, questions: questions.map(toPayload) }
-    const quiz = quizId === null ? await api.createQuiz(payload) : await api.updateQuiz(quizId, payload)
+    let quiz
+    try {
+      quiz = quizId === null
+        ? await api.createQuiz(payload)
+        : await api.updateQuiz(quizId, { ...payload, base_updated_at: force ? null : version.current })
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        setConflict(true)
+        return null
+      }
+      throw e
+    }
+    version.current = quiz.updated_at
+    setConflict(false)
     const unchanged = sentRevision === revision.current
     setDirty(!unchanged)
     setSaved(unchanged)
@@ -213,10 +232,10 @@ export function Editor() {
     setSel(0)
   }
 
-  const onSave = async () => {
+  const onSave = async (force = false) => {
     setBusy('save')
     try {
-      await save()
+      await save(force)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -304,7 +323,7 @@ export function Editor() {
         </div>
         <div className="row">
           {showErrors && badCount > 0 && <span className="chip chip-error">Исправьте: {badCount}</span>}
-          <button type="button" className="btn" onClick={onSave} disabled={busy !== null}>
+          <button type="button" className="btn" onClick={() => onSave()} disabled={busy !== null}>
             {busy === 'save' ? 'Сохраняем…' : 'Сохранить'}
           </button>
           <button type="button" className="btn btn-accent" onClick={onLaunch} disabled={busy !== null}>
@@ -316,6 +335,22 @@ export function Editor() {
       {error && (
         <div role="alert" className="alert alert-error" style={{ marginBottom: 16 }}>
           {error}
+        </div>
+      )}
+      {conflict && (
+        <div role="alert" className="alert alert-error stack" style={{ marginBottom: 16, gap: 10 }}>
+          <span>
+            Эту викторину уже изменили в другой вкладке или на другом устройстве. Ваши правки не потеряны:
+            сохраните их поверх или загрузите версию с сервера.
+          </span>
+          <div className="row">
+            <button type="button" className="btn btn-sm" onClick={() => onSave(true)} disabled={busy !== null}>
+              Сохранить мои правки поверх
+            </button>
+            <button type="button" className="btn btn-sm" onClick={discardDraft} disabled={busy !== null}>
+              Загрузить версию с сервера
+            </button>
+          </div>
         </div>
       )}
       {restored && (

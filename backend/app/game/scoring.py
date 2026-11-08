@@ -3,7 +3,6 @@
 Вопрос здесь — словарь из snapshot сессии (см. sessions.build_snapshot).
 """
 
-import math
 from typing import Any
 
 from pydantic import ValidationError
@@ -23,13 +22,11 @@ def speed_factor(response_ms: int, time_limit_s: int) -> float:
 def is_exact(guess: float, answer: float, tolerance: float) -> bool:
     """Точное попадание — единое правило для бонуса, флага `exact` и сообщения игроку.
 
-    Совпадение с точностью до погрешности float (относительной 1e-12) и обязательно
-    строже допуска вопроса: ответ за пределами допуска точным не бывает.
+    Допускаем только погрешность записи дробей (0.1 + 0.2 против 0.3): отклонение не больше
+    миллиардной доли допуска. На больших числах относительное сравнение признало бы
+    «точным» ответ, который почти на весь допуск мимо.
     """
-    diff = abs(guess - answer)
-    if diff >= tolerance:
-        return False
-    return math.isclose(guess, answer, rel_tol=1e-12, abs_tol=min(1e-12, tolerance / 1000))
+    return guess == answer or abs(guess - answer) <= tolerance * 1e-9
 
 
 def score_single(q: dict[str, Any], value: dict[str, Any], response_ms: int) -> tuple[bool, int]:
