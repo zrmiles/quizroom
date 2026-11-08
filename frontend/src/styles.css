@@ -173,6 +173,8 @@ input[type='range'] { width: 100%; accent-color: var(--coral); height: 36px; }
 .cell-slow { background: var(--reef-soft); color: var(--ink); }
 .cell-wrong { background: var(--error-bg); color: var(--error); }
 .cell-none { background: #e7eef0; color: var(--muted); }
+.cell-absent { background: transparent; color: var(--muted); border: 1px dashed var(--line); }
+.cell-unshown { background: transparent; color: var(--line); }
 
 .grid-auto { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
 .kpi { display: flex; flex-direction: column; gap: 4px; }

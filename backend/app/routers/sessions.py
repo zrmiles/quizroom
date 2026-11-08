@@ -25,6 +25,12 @@ from app.schemas import (
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
+# Вопрос «трудный», если верно ответили меньше половины тех, кто мог ответить.
+# Это же правило решает, что попадёт в «повторить только ошибки».
+HARD_RATE = 0.5
+# Служебные отметки отчёта в снимке, которые не переносятся в новую игру.
+PLAY_MARKS = ("eligible", "shown")
+
 
 def build_snapshot(questions: list[Question]) -> list[dict[str, Any]]:
     """Копия вопросов на момент запуска игры — вместе с правильными ответами."""
@@ -58,6 +64,8 @@ def _session_snapshot(snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Новые непрозрачные ID также при повторе игр, созданных до исправления."""
     snapshot = deepcopy(snapshot)
     for q in snapshot:
+        for key in PLAY_MARKS:
+            q.pop(key, None)
         if q["type"] != "order":
             continue
         ids: set[int] = set()
@@ -199,20 +207,44 @@ async def report(
     return build_report(gs)
 
 
+def _was_shown(q: dict[str, Any]) -> bool:
+    # В играх, сохранённых до появления отметок, считаем показанными все вопросы.
+    return "eligible" in q or q.get("shown", True)
+
+
 def build_report(gs: GameSession) -> dict[str, Any]:
     snap = gs.snapshot
     players = sorted(gs.players, key=lambda p: (p.final_rank or 10**6, p.nickname))
-    n_players = len(players)
+    everyone = {p.id for p in players}
+    shown = [_was_shown(q) for q in snap]
+    eligible = [set(q["eligible"]) & everyone if "eligible" in q else everyone for q in snap]
     questions = []
     for i, q in enumerate(snap):
-        answers = [a for p in players for a in p.answers if a.question_index == i]
+        if not shown[i]:
+            questions.append(
+                {
+                    "index": i,
+                    "type": q["type"],
+                    "text": q["text"],
+                    "shown": False,
+                    "eligible": 0,
+                    "correct_rate": None,
+                    "answered": 0,
+                    "avg_ms": None,
+                }
+            )
+            continue
+        answers = [a for p in players if p.id in eligible[i] for a in p.answers if a.question_index == i]
         correct = sum(1 for a in answers if a.is_correct)
+        n = len(eligible[i])
         questions.append(
             {
                 "index": i,
                 "type": q["type"],
                 "text": q["text"],
-                "correct_rate": round(correct / n_players, 3) if n_players else 0,
+                "shown": True,
+                "eligible": n,
+                "correct_rate": round(correct / n, 3) if n else None,
                 "answered": len(answers),
                 "avg_ms": round(sum(a.response_ms for a in answers) / len(answers)) if answers else None,
             }
@@ -223,7 +255,11 @@ def build_report(gs: GameSession) -> dict[str, Any]:
         cells = []
         for i, q in enumerate(snap):
             a = by_index.get(i)
-            if a is None:
+            if not shown[i]:
+                state = "unshown"
+            elif p.id not in eligible[i]:
+                state = "absent"
+            elif a is None:
                 state = "none"
             elif not a.is_correct:
                 state = "wrong"
@@ -241,13 +277,15 @@ def build_report(gs: GameSession) -> dict[str, Any]:
                 "rank": p.final_rank,
                 "reconnects": p.reconnects,
                 "correct": sum(1 for a in p.answers if a.is_correct),
+                "asked": sum(1 for c in cells if c["state"] not in ("unshown", "absent")),
                 "skipped": sum(1 for c in cells if c["state"] == "none"),
                 "cells": cells,
             }
         )
+    rated = [q for q in questions if q["correct_rate"] is not None]
     all_answers = [a for p in players for a in p.answers]
-    hardest = min(questions, key=lambda q: q["correct_rate"]) if questions else None
-    last = len(snap) - 1
+    hardest = min(rated, key=lambda q: q["correct_rate"]) if rated else None
+    last = max((i for i, s in enumerate(shown) if s), default=None)
     return {
         "session": {
             "id": gs.id,
@@ -256,18 +294,22 @@ def build_report(gs: GameSession) -> dict[str, Any]:
             "status": gs.status,
             "created_at": gs.created_at.isoformat() if gs.created_at else None,
             "finished_at": gs.finished_at.isoformat() if gs.finished_at else None,
-            "player_count": n_players,
+            "player_count": len(players),
             "question_count": len(snap),
         },
         "summary": {
-            "avg_correct_rate": round(sum(q["correct_rate"] for q in questions) / len(questions), 3)
-            if questions
-            else 0,
+            "shown_count": sum(shown),
+            "ended_early": not all(shown),
+            "avg_correct_rate": round(sum(q["correct_rate"] for q in rated) / len(rated), 3) if rated else None,
             "hardest_index": hardest["index"] if hardest else None,
             "avg_response_ms": round(sum(a.response_ms for a in all_answers) / len(all_answers))
             if all_answers
             else None,
-            "finished_count": sum(1 for p in players if any(a.question_index == last for a in p.answers)),
+            "finished_count": sum(1 for p in players if any(a.question_index == last for a in p.answers))
+            if last is not None
+            else 0,
+            "hard_rate": HARD_RATE,
+            "retry_count": sum(1 for q in rated if q["correct_rate"] < HARD_RATE),
         },
         "questions": questions,
         "players": rows,
@@ -283,13 +325,17 @@ async def retry_mistakes(
     if gs.status != "finished":
         raise HTTPException(status.HTTP_409_CONFLICT, "Сначала закончите игру")
     rep = build_report(gs)
-    hard = [q["index"] for q in rep["questions"] if q["correct_rate"] < 0.5]
+    hard = [q["index"] for q in rep["questions"] if q["correct_rate"] is not None and q["correct_rate"] < HARD_RATE]
     if not hard:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Трудных вопросов нет — больше половины ответили верно везде")
+        if not any(q["correct_rate"] is not None for q in rep["questions"]):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "В игре не было участников — повторять нечего")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Трудных вопросов нет: везде верно ответили не меньше половины"
+        )
     quiz_exists = await db.scalar(select(Quiz.id).where(Quiz.id == gs.quiz_id))
     if quiz_exists is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Исходная викторина удалена")
-    snapshot = [gs.snapshot[i] for i in hard]
+    snapshot = [gs.snapshot[i] for i in hard]  # отметки отчёта снимет _session_snapshot
     suffix = " · работа над ошибками"
     title = gs.title if gs.title.endswith(suffix) else f"{gs.title}{suffix}"
     return await _open_room(db, gs.quiz_id, user, title[:120], snapshot, parent_id=gs.id)
