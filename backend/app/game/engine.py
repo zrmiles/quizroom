@@ -107,6 +107,8 @@ class Room:
         self.lock = asyncio.Lock()
         # Для «по порядку» игроки видят элементы перемешанными — одинаково для всех.
         self.shuffles: dict[int, list[dict[str, Any]]] = {}
+        # Кто мог ответить на каждый показанный вопрос: игроки на момент показа и вошедшие во время него.
+        self.eligible: dict[int, list[int]] = {}
         for i, q in enumerate(questions):
             if q["type"] == "order":
                 self.shuffles[i] = _shuffle_not_identity([{"id": o["id"], "text": o["text"]} for o in q["options"]])
@@ -116,6 +118,8 @@ class Room:
     def add_player(self, player_id: int, nickname: str, avatar: dict[str, Any], token: str) -> PlayerState:
         st = PlayerState(id=player_id, nickname=nickname, avatar=avatar, token=token)
         self.players[player_id] = st
+        if self.state == QUESTION:
+            self.eligible.setdefault(self.index, []).append(player_id)
         return st
 
     def nickname_taken(self, nickname: str) -> bool:
@@ -438,6 +442,7 @@ class Room:
         self._cancel_timer()
         self.index = i
         self.state = QUESTION
+        self.eligible[i] = list(self.players)
         self.started_at_ms = now_ms()
         self.ends_at_ms = self.started_at_ms + self.questions[i]["time_limit"] * 1000
         msg = {
@@ -599,6 +604,16 @@ class Room:
         await asyncio.gather(*(close(ws) for ws in sockets))
         await asyncio.gather(*list(self.closers), return_exceptions=True)
 
+    def played_snapshot(self) -> list[dict[str, Any]]:
+        """Снимок вопросов с отметкой, что реально показывали и кто мог ответить — для честного отчёта."""
+        out = []
+        for i, q in enumerate(self.questions):
+            if i in self.eligible:
+                out.append({**q, "eligible": [pid for pid in self.eligible[i] if pid in self.players]})
+            else:
+                out.append({**q, "shown": False})
+        return out
+
     # ---------- база ----------
 
     async def _mark_started(self) -> None:
@@ -616,6 +631,7 @@ class Room:
                 if gs is None:
                     raise GameError("Игра удалена, сохранить итоги нельзя")
                 gs.status = "finished"
+                gs.snapshot = self.played_snapshot()
                 if gs.finished_at is None:  # повтор сохранения не переписывает историю
                     gs.finished_at = datetime.now(UTC)
                 ranks = {r["id"]: r["rank"] for r in self.leaderboard()}
