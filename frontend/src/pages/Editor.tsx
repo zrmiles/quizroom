@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useBlocker, useNavigate, useParams } from 'react-router-dom'
 
 import { api } from '../lib/api'
+import { useCurrentUser } from '../lib/auth'
+import { draftKey, loadDraft, removeDraft, saveDraft, type EditorDraft } from '../lib/draft'
 import { LETTERS, TYPE_LABELS, plural } from '../lib/format'
 import type { QType, QuestionDraft } from '../lib/types'
 import { blankQuestion, questionProblems, toPayload, withType } from '../lib/validate'
@@ -28,6 +30,10 @@ export function Editor() {
   const [saved, setSaved] = useState(false)
   // Красные рамки — только после первой попытки сохранить, чтобы пустой вопрос не «кричал».
   const [showErrors, setShowErrors] = useState(false)
+  // Правки, восстановленные из черновика вкладки (например, после истечения входа).
+  const [restored, setRestored] = useState(false)
+  const user = useCurrentUser()
+  const key = draftKey(user?.id ?? null, quizId)
 
   // После первого сохранения адрес меняется на /quizzes/:id/edit — перечитывать с сервера не нужно,
   // иначе сбросится выбранный вопрос.
@@ -37,6 +43,31 @@ export function Editor() {
   const blocker = useBlocker(() => dirty && !navigationAllowed.current)
 
   useEffect(() => { navigationAllowed.current = false }, [quizId])
+
+  const applyDraft = (d: EditorDraft) => {
+    setTitle(d.title)
+    setDescription(d.description)
+    setIsPublic(d.is_public)
+    setQuestions(d.questions.length ? d.questions : [blankQuestion()])
+    setSel(0)
+    revision.current += 1
+    setDirty(true)
+    setSaved(false)
+    setRestored(true)
+  }
+
+  // Новая викторина: черновик восстанавливаем сразу, загружать с сервера нечего.
+  useEffect(() => {
+    if (quizId !== null) return
+    const d = loadDraft(key)
+    if (d) applyDraft(d)
+  }, [key])
+
+  // Пока есть несохранённые правки, держим их копию во вкладке.
+  useEffect(() => {
+    if (!dirty || loading || loadError) return
+    saveDraft(key, { title, description, is_public: isPublic, questions })
+  }, [dirty, loading, loadError, key, title, description, isPublic, questions])
 
   useEffect(() => {
     if (quizId === null) return
@@ -57,6 +88,9 @@ export function Editor() {
         setQuestions(q.questions.length ? q.questions : [blankQuestion()])
         setSel(0)
         setDirty(false)
+        setRestored(false)
+        const d = loadDraft(key)
+        if (d) applyDraft(d)
       })
       .catch((e: Error) => { if (active) setLoadError(e.message) })
       .finally(() => { if (active) setLoading(false) })
@@ -151,6 +185,10 @@ export function Editor() {
     const unchanged = sentRevision === revision.current
     setDirty(!unchanged)
     setSaved(unchanged)
+    if (unchanged) {
+      removeDraft(key)
+      setRestored(false)
+    }
     if (quizId === null) {
       skipNextLoad.current = true
       navigationAllowed.current = true
@@ -158,6 +196,21 @@ export function Editor() {
     }
     if (!unchanged) setError('Пока шло сохранение, появились новые изменения. Сохраните их перед запуском')
     return unchanged ? quiz.id : null
+  }
+
+  const discardDraft = () => {
+    removeDraft(key)
+    setRestored(false)
+    setDirty(false)
+    if (quizId !== null) {
+      setLoadAttempt((n) => n + 1)
+      return
+    }
+    setTitle('Новая викторина')
+    setDescription('')
+    setIsPublic(false)
+    setQuestions([blankQuestion()])
+    setSel(0)
   }
 
   const onSave = async () => {
@@ -221,17 +274,21 @@ export function Editor() {
     <div className="container" style={{ maxWidth: 1440, paddingBottom: 48 }}>
       {blocker.state === 'blocked' && (
         <div role="alertdialog" aria-modal="true" aria-label="Несохранённые изменения"
-          className="leave-dialog">
+          className="leave-dialog" onKeyDown={(e) => { if (e.key === 'Escape') blocker.reset() }}>
           <section className="card stack">
             <h2>Изменения не сохранены</h2>
             <p>Если уйти, последние правки будут потеряны.</p>
             <div className="row">
               <button type="button" className="btn btn-primary" autoFocus onClick={() => blocker.reset()}>Остаться</button>
-              <button type="button" className="btn" onClick={() => blocker.proceed()}>Уйти без сохранения</button>
+              <button type="button" className="btn" onClick={() => { removeDraft(key); blocker.proceed() }}>
+                Уйти без сохранения
+              </button>
             </div>
           </section>
         </div>
       )}
+      {/* Пока открыт диалог, остальная страница недоступна ни мышью, ни клавиатурой. */}
+      <div {...(blocker.state === 'blocked' ? { inert: '' } : {})}>
       <header className="row between" style={{ padding: '16px 0', borderBottom: '1px solid var(--line)', marginBottom: 20 }}>
         <div className="row" style={{ gap: 14 }}>
           <Link to="/quizzes" style={{ color: 'var(--ink)', fontWeight: 600, textDecoration: 'none' }}>
@@ -259,6 +316,14 @@ export function Editor() {
       {error && (
         <div role="alert" className="alert alert-error" style={{ marginBottom: 16 }}>
           {error}
+        </div>
+      )}
+      {restored && (
+        <div role="status" className="alert alert-info row between" style={{ marginBottom: 16 }}>
+          <span>Восстановили правки, которые не успели сохранить. Сохраните их или верните сохранённую версию.</span>
+          <button type="button" className="btn" onClick={discardDraft} disabled={busy !== null}>
+            {quizId === null ? 'Начать заново' : 'Вернуть сохранённую версию'}
+          </button>
         </div>
       )}
 
@@ -454,6 +519,7 @@ export function Editor() {
         </aside>
       </div>
       </fieldset>
+      </div>
     </div>
   )
 }
