@@ -138,7 +138,8 @@ def test_retry_only_mistakes(client, host, quiz):
     info = client.get(f"/api/sessions/{retry_pin}").json()
     assert "работа над ошибками" in info["title"]
     hist = client.get("/api/sessions/history", headers=host["headers"]).json()
-    assert hist[0]["parent_session_id"] == session_id and hist[0]["question_count"] == 3
+    # Игру завершили после первого вопроса: непоказанные вопросы в повтор не идут.
+    assert hist[0]["parent_session_id"] == session_id and hist[0]["question_count"] == 1
 
 
 def test_host_cannot_start_without_players(client, host, quiz):

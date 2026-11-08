@@ -250,7 +250,7 @@ async def scenario_full_game(http):
     rep = (await http.get(f"/api/sessions/{sid}/report", headers=host["h"])).json()
     late_row = next(p for p in rep["players"] if p["nickname"] == "Опоздавший")
     silent_row = next(p for p in rep["players"] if p["nickname"] == "Молчун")
-    check("в отчёте у опоздавшего пропущен 1-й вопрос", late_row["cells"][0]["state"] == "none")
+    check("в отчёте опоздавший не участвовал в 1-м вопросе", late_row["cells"][0]["state"] == "absent")
     check("в отчёте у молчуна все ячейки пустые", all(c["state"] == "none" for c in silent_row["cells"]))
     check("переподключение Маши учтено", next(p for p in rep["players"] if p["nickname"] == "Маша")["reconnects"] == 1)
     check("«дошли до конца» = 5 (кроме молчуна)", rep["summary"]["finished_count"] == 5, str(rep["summary"]))

@@ -1,5 +1,9 @@
+import asyncio
+from collections import defaultdict
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -7,11 +11,19 @@ from app.db import get_db
 from app.deps import get_current_user
 from app.game.engine import manager
 from app.models import AnswerOption, Question, Quiz, User
-from app.schemas import QuizIn, QuizOut, QuizSummary
+from app.schemas import DbIdPath, QuizIn, QuizOut, QuizSummary
 
 router = APIRouter(prefix="/api/quizzes", tags=["quizzes"])
 
 _with_questions = selectinload(Quiz.questions).selectinload(Question.options)
+
+# Проверка версии и запись идут под одной блокировкой на викторину: API работает одним процессом,
+# а SQLite не блокирует строку при чтении, поэтому без неё два PUT могли бы пройти проверку оба.
+_edit_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 async def load_quiz(db: AsyncSession, quiz_id: int, user: User) -> Quiz:
@@ -32,7 +44,9 @@ def _fill(quiz: Quiz, data: QuizIn) -> None:
     quiz.title = data.title.strip()
     quiz.description = data.description.strip()
     quiz.is_public = data.is_public
-    quiz.updated_at = func.now()  # иначе правка только вопросов не меняет дату
+    # Явное время с микросекундами: правка только вопросов тоже меняет дату, и две быстрые
+    # правки подряд получают разные версии (у SQLite CURRENT_TIMESTAMP — с точностью до секунды).
+    quiz.updated_at = datetime.now(UTC)
     quiz.questions.clear()
     for pos, q in enumerate(data.questions):
         question = Question(
@@ -73,23 +87,29 @@ async def create_quiz(data: QuizIn, user: User = Depends(get_current_user), db: 
 
 
 @router.get("/{quiz_id}", response_model=QuizOut)
-async def get_quiz(quiz_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_quiz(quiz_id: DbIdPath, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     return await load_quiz(db, quiz_id, user)
 
 
 @router.put("/{quiz_id}", response_model=QuizOut)
 async def update_quiz(
-    quiz_id: int, data: QuizIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    quiz_id: DbIdPath, data: QuizIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
-    quiz = await load_quiz(db, quiz_id, user)
-    _own(quiz, user)
-    _fill(quiz, data)
-    await db.commit()
+    async with _edit_locks[quiz_id]:
+        quiz = await load_quiz(db, quiz_id, user)
+        _own(quiz, user)
+        if data.base_updated_at is not None and _as_utc(data.base_updated_at) != _as_utc(quiz.updated_at):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Викторину уже изменили в другой вкладке или на другом устройстве",
+            )
+        _fill(quiz, data)
+        await db.commit()
     return await load_quiz(db, quiz_id, user)
 
 
 @router.delete("/{quiz_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_quiz(quiz_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def delete_quiz(quiz_id: DbIdPath, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     owner_id = await db.scalar(select(Quiz.owner_id).where(Quiz.id == quiz_id))
     if owner_id is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Викторина не найдена")
