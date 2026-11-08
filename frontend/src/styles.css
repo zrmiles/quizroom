@@ -45,7 +45,8 @@ h2 { font-size: 26px; }
 h3 { font-size: 20px; }
 p { margin: 0; }
 
-:focus-visible { outline: 3px solid var(--coral); outline-offset: 2px; }
+/* Тёмный контур читается на белом и на воде (коралловый на белом давал контраст 2,6:1). */
+:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
 
 .container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
 .page { padding-top: 24px; padding-bottom: 64px; display: flex; flex-direction: column; gap: 24px; }

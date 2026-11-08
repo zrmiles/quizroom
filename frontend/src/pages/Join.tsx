@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import { AVATAR_COLORS, Creature, SHAPES } from '../components/Creature'
@@ -23,17 +23,22 @@ export function Join() {
   // Уже входили в эту комнату с этого устройства — предложим продолжить или зайти другим игроком.
   const [existing, setExisting] = useState<PlayerTicket | null>(null)
 
+  // Код, который сейчас в поле: ответ по старому коду не должен открыть другую комнату.
+  const currentPin = useRef(pin)
+  currentPin.current = pin
+
   const checkPin = async (code: string) => {
     setError(null)
     setBusy(true)
     try {
       const info = await api.sessionByPin(code)
+      if (currentPin.current !== code) return
       setExisting(load<PlayerTicket>(playerKey(code)))
       setRoom(info)
     } catch (e) {
-      setError((e as Error).message)
+      if (currentPin.current === code) setError((e as Error).message)
     } finally {
-      setBusy(false)
+      if (currentPin.current === code) setBusy(false)
     }
   }
 
@@ -110,6 +115,7 @@ export function Join() {
             onChange={(e) => {
               setPin(e.target.value.replace(/\D/g, '').slice(0, 6))
               setError(null)
+              setBusy(false)
             }}
             style={{ height: 72, textAlign: 'center', fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 40,
               letterSpacing: '0.2em' }}

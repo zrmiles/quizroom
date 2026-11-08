@@ -14,6 +14,7 @@ from app.game.engine import FINISHED, manager
 from app.models import GameSession, Player, Question, Quiz, User
 from app.routers.quizzes import load_quiz
 from app.schemas import (
+    DbIdPath,
     JoinIn,
     JoinOut,
     SessionCreatedOut,
@@ -188,7 +189,7 @@ async def _own_session(db: AsyncSession, session_id: int, user: User) -> GameSes
 
 @router.get("/{session_id}/report")
 async def report(
-    session_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    session_id: DbIdPath, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     gs = await _own_session(db, session_id, user)
     if gs.status == "aborted":
@@ -275,7 +276,7 @@ def build_report(gs: GameSession) -> dict[str, Any]:
 
 @router.post("/{session_id}/retry", response_model=SessionCreatedOut, status_code=status.HTTP_201_CREATED)
 async def retry_mistakes(
-    session_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    session_id: DbIdPath, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> SessionCreatedOut:
     """Новая игра только из вопросов, на которые верно ответили меньше половины."""
     gs = await _own_session(db, session_id, user)
