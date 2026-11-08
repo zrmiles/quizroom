@@ -260,6 +260,9 @@ class StrictMessage(BaseModel):
 
 class HostCommand(StrictMessage):
     type: Literal["host:start", "host:next", "host:skip", "host:end"]
+    # Для «Закрыть вопрос» и «Дальше»: к какому вопросу относится нажатие.
+    # Запоздавшая команда по прошлому вопросу не должна закрыть или пропустить следующий.
+    questionIndex: StrictInt | None = Field(default=None, ge=0)
 
 
 class KickCommand(StrictMessage):
