@@ -88,6 +88,10 @@ class Room:
         self.last_activity = time.monotonic()
         # Имена, которые сейчас регистрируются через /join (защита от одновременных входов).
         self.reserved_nicks: set[str] = set()
+        # Ведущий закрыл вход: новые игроки не принимаются, уже вошедшие переподключаются как обычно.
+        self.join_locked = False
+        # Имена удалённых игроков: под ними в эту комнату больше не войти.
+        self.banned_nicks: set[str] = set()
         self.pin = pin
         self.host_id = host_id
         self.title = title
@@ -236,7 +240,11 @@ class Room:
             await self._to_player(p, msg)
 
     async def broadcast_lobby(self) -> None:
-        msg = {"type": "lobby:update", "players": [p.public() for p in self.players.values()]}
+        msg = {
+            "type": "lobby:update",
+            "players": [p.public() for p in self.players.values()],
+            "locked": self.join_locked,
+        }
         await self._to_hosts(msg)
         await self._to_players({"type": "lobby:update", "playerCount": len(self.players)})
 
@@ -356,6 +364,7 @@ class Room:
         }
         if player is None:
             snap["players"] = [p.public() for p in self.players.values()]
+            snap["locked"] = self.join_locked
         else:
             snap["you"] = {**player.public(), "rank": self._rank_of(player.id)}
         if self.state == QUESTION:
@@ -424,6 +433,9 @@ class Room:
                 await self._finish()
         elif kind == "host:kick":
             await self._kick(msg.get("player_id"))
+        elif kind in ("host:lock", "host:unlock"):
+            self.join_locked = kind == "host:lock"
+            await self.broadcast_lobby()
         else:
             raise GameError("Неизвестная команда")
 
@@ -576,6 +588,7 @@ class Room:
             log.exception("Не удалось удалить игрока %s из базы", player_id)
             raise GameError("Не удалось удалить игрока. Попробуйте ещё раз") from e
         self.players.pop(player_id, None)
+        self.banned_nicks.add(p.nickname.casefold())
         for ws in list(p.sockets):
             await self._send(ws, {"type": "kicked"})
             await self._close_socket(ws, 4001)

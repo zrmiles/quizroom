@@ -33,7 +33,13 @@ export function Join() {
     try {
       const info = await api.sessionByPin(code)
       if (currentPin.current !== code) return
-      setExisting(load<PlayerTicket>(playerKey(code)))
+      const ticket = load<PlayerTicket>(playerKey(code))
+      // Новичка в закрытую комнату не пускаем сразу; уже вошедший с этого устройства может вернуться.
+      if (info.accepting === false && !ticket) {
+        setError('Ведущий закрыл вход в эту комнату')
+        return
+      }
+      setExisting(ticket)
       setRoom(info)
     } catch (e) {
       if (currentPin.current === code) setError((e as Error).message)
