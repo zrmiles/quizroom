@@ -2,7 +2,7 @@ import secrets
 from copy import deepcopy
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -136,24 +136,37 @@ async def history(user: User = Depends(get_current_user), db: AsyncSession = Dep
 
 
 @router.get("/{pin}", response_model=SessionPublicOut)
-async def session_by_pin(pin: str) -> SessionPublicOut:
+async def session_by_pin(pin: str, request: Request) -> SessionPublicOut:
+    limits = request.app.state.rate_limit
+    limits.ensure_allowed(request, "pin_miss")
     room = manager.get(pin)
     if room is None or room.state == FINISHED:
+        limits.record(request, "pin_miss")
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Комната не найдена. Проверьте код")
-    return SessionPublicOut(pin=pin, title=room.title, status=room.state, player_count=len(room.players))
+    return SessionPublicOut(
+        pin=pin, title=room.title, status=room.state, player_count=len(room.players), accepting=not room.join_locked
+    )
 
 
 @router.post("/{pin}/join", response_model=JoinOut, status_code=status.HTTP_201_CREATED)
-async def join(pin: str, data: JoinIn, db: AsyncSession = Depends(get_db)) -> JoinOut:
+async def join(pin: str, data: JoinIn, request: Request, db: AsyncSession = Depends(get_db)) -> JoinOut:
+    limits = request.app.state.rate_limit
+    limits.ensure_allowed(request, "pin_miss")
     room = manager.get(pin)
     if room is None:
+        limits.record(request, "pin_miss")
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Комната не найдена. Проверьте код")
+    limits.check(request, "join")
     # Вход в две фазы: запись в базу идёт без lock комнаты, чтобы медленная база
     # не задерживала ответы игроков. Имя резервируется на это время.
     nick_key = data.nickname.casefold()
     async with room.lock:
         if room.state == FINISHED or manager.get(pin) is not room:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Комната закрыта")
+        if room.join_locked:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Ведущий закрыл вход в эту комнату")
+        if nick_key in room.banned_nicks:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Ведущий удалил игрока с этим именем из комнаты")
         if room.nickname_taken(data.nickname):
             raise HTTPException(status.HTTP_409_CONFLICT, "Такое имя уже занято — добавьте букву или цифру")
         if len(room.players) + len(room.reserved_nicks) >= 200:
