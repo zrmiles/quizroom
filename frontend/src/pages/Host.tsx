@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { Creature } from '../components/Creature'
+import { QrCode } from '../components/QrCode'
 import { Timer } from '../components/Timer'
 import { getToken } from '../lib/api'
 import { LETTERS, TYPE_LABELS, fishPosition, formatNumber, formatPin, formatPoints, histogram, plural } from '../lib/format'
@@ -20,11 +21,13 @@ interface HostState {
   reveal: HostReveal | null
   final: HostFinal | null
   error: string | null
+  /** Ведущий закрыл вход для новых игроков. */
+  locked: boolean
 }
 
 const initial: HostState = {
   phase: 'connecting', title: '', questionCount: 0, players: [], question: null, endsAt: 0, answered: 0, total: 0,
-  reveal: null, final: null, error: null,
+  reveal: null, final: null, error: null, locked: false,
 }
 
 export function Host() {
@@ -59,12 +62,14 @@ export function Host() {
             total: msg.playerCount as number,
             reveal,
             final: (msg.final as HostFinal | undefined) ?? null,
+            locked: Boolean(msg.locked),
           }
         }
         case 'lobby:update': {
           const players = msg.players as PublicPlayer[]
           // Игрок может зайти посреди вопроса — сразу учитываем его в «из N ответили».
-          return { ...prev, players, total: prev.phase === 'question' ? players.length : prev.total }
+          return { ...prev, players, total: prev.phase === 'question' ? players.length : prev.total,
+            locked: Boolean(msg.locked) }
         }
         case 'question:start':
           return { ...prev, phase: 'question', question: msg.question as PublicQuestion, endsAt: msg.endsAt as number,
@@ -104,6 +109,8 @@ export function Host() {
   }
 
   const joinUrl = `${window.location.host}/join`
+  // Ссылка с кодом: телефон сразу открывает ввод имени для этой комнаты.
+  const inviteUrl = `${window.location.origin}/join?pin=${pin}`
 
   return (
     <div className={`screen${s.phase === 'lobby' || s.phase === 'connecting' ? '' : ' screen-light'}`}>
@@ -115,6 +122,14 @@ export function Host() {
             <span>Вопрос {s.question.index + 1} из {s.question.total}</span>
           )}
           <span>PIN {formatPin(pin)}</span>
+          {s.phase !== 'finished' && s.phase !== 'connecting' && (
+            <button type="button" className={`btn btn-sm${s.locked ? ' btn-primary' : ''}`} disabled={!online}
+              aria-pressed={s.locked} onClick={() => cmd(s.locked ? 'host:unlock' : 'host:lock')}
+              title={s.locked ? 'Новые игроки не могут войти. Уже вошедшие переподключаются как обычно'
+                : 'Не пускать новых игроков в комнату'}>
+              {s.locked ? 'Вход закрыт · открыть' : 'Закрыть вход'}
+            </button>
+          )}
         </span>
       </header>
       {s.error && <div role="alert" className="alert alert-error">{s.error}</div>}
@@ -128,6 +143,12 @@ export function Host() {
             <span className="display" style={{ fontSize: 36 }}>Заплывайте!</span>
             <span style={{ fontWeight: 600 }}>{joinUrl} → код комнаты</span>
             <span className="pin-big">{formatPin(pin)}</span>
+            <div className="row" style={{ gap: 14, alignItems: 'center', flexWrap: 'nowrap' }}>
+              <QrCode value={inviteUrl} size={148} label={`QR-код для входа в комнату ${formatPin(pin)}`} />
+              <span className="small" style={{ fontWeight: 600 }}>
+                Или наведите камеру телефона на код — откроется вход в эту комнату
+              </span>
+            </div>
             <div style={{ flex: 1 }} />
             <div className="row between" style={{ fontWeight: 700 }}>
               <span>В аквариуме</span>
@@ -137,7 +158,9 @@ export function Host() {
               onClick={() => cmd('host:start')}>
               Начать игру
             </button>
-            <span className="small muted">Нажмите на существо, чтобы удалить игрока</span>
+            <span className="small muted">
+              Нажмите на существо, чтобы удалить игрока: под тем же именем он вернуться не сможет
+            </span>
           </aside>
           <main className="aquarium" aria-label="Игроки в комнате">
             {s.players.length === 0 && (
