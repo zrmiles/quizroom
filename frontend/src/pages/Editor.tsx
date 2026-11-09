@@ -332,6 +332,35 @@ export function Editor() {
         </div>
       </header>
 
+      <details className="card" style={{ marginBottom: 16 }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+          Описание и доступ
+          <span className="small muted" style={{ fontWeight: 400 }}>
+            {' · '}{isPublic ? 'открыта другим ведущим' : 'только у вас'}
+            {description.trim() ? '' : ' · без описания'}
+          </span>
+        </summary>
+        <div className="stack" style={{ gap: 12, marginTop: 12 }}>
+          <div className="field">
+            <label htmlFor="quiz-description">Описание</label>
+            <textarea id="quiz-description" className="textarea" rows={3} maxLength={1000} disabled={locked}
+              placeholder="Для кого викторина и о чём, например: «Повторение перед контрольной, 8 класс»"
+              value={description} onChange={(e) => { setDescription(e.target.value); markDirty() }} />
+            <span className="small muted">{description.length} / 1000</span>
+          </div>
+          <label className="row" style={{ gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
+            <input type="checkbox" checked={isPublic} disabled={locked} style={{ marginTop: 4 }}
+              onChange={(e) => { setIsPublic(e.target.checked); markDirty() }} />
+            <span className="stack" style={{ gap: 2 }}>
+              <span>Открыть другим ведущим</span>
+              <span className="small muted">
+                Они смогут открыть викторину по ссылке и увидят правильные ответы. Не включайте для контрольных.
+              </span>
+            </span>
+          </label>
+        </div>
+      </details>
+
       {error && (
         <div role="alert" className="alert alert-error" style={{ marginBottom: 16 }}>
           {error}
