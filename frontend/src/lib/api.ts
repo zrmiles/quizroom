@@ -104,7 +104,8 @@ export const api = {
     request<{ id: number; pin: string }>('/sessions', { method: 'POST', body: { quiz_id: quizId } }),
   history: () => request<SessionHistoryItem[]>('/sessions/history'),
   sessionByPin: (pin: string) =>
-    request<{ pin: string; title: string; status: string; player_count: number }>(`/sessions/${pin}`),
+    request<{ pin: string; title: string; status: string; player_count: number; accepting?: boolean }>(
+      `/sessions/${pin}`),
   join: (pin: string, nickname: string, avatar: Avatar) =>
     request<{ player_id: number; token: string; nickname: string }>(`/sessions/${pin}/join`, {
       method: 'POST',
