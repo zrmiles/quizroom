@@ -38,4 +38,6 @@ it('в лобби есть QR-код со ссылкой на эту комна�
   })
   const qr = screen.getByRole('img', { name: 'QR-код для входа в комнату 482 913' })
   expect(qr.querySelector('path')?.getAttribute('d')).toMatch(/^M\d+ \d+h1v1h-1z/)
+  // В строке с подписью код не должен сжиматься — иначе камера его не прочтёт.
+  expect(qr.style.flexShrink).toBe('0')
 })
