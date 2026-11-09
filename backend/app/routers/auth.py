@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.post("/register", response_model=TokenOut, status_code=status.HTTP_201_CREATED)
 async def register(data: RegisterIn, request: Request, db: AsyncSession = Depends(get_db)) -> TokenOut:
-    request.app.state.auth_rate_limit.check(request, "register")
+    request.app.state.rate_limit.check(request, "register")
     email = data.email.lower()
     exists = await db.scalar(select(User.id).where(User.email == email))
     if exists:
@@ -33,7 +33,7 @@ async def register(data: RegisterIn, request: Request, db: AsyncSession = Depend
 
 @router.post("/login", response_model=TokenOut)
 async def login(data: LoginIn, request: Request, db: AsyncSession = Depends(get_db)) -> TokenOut:
-    request.app.state.auth_rate_limit.check(request, "login")
+    request.app.state.rate_limit.check(request, "login")
     user = await db.scalar(select(User).where(User.email == data.email.lower()))
     valid = user is not None and await to_thread.run_sync(
         verify_password, data.password, user.password_hash, limiter=request.app.state.password_limiter

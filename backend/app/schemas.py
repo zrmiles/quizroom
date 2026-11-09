@@ -221,6 +221,7 @@ class SessionPublicOut(BaseModel):
     title: str
     status: str
     player_count: int
+    accepting: bool = True  # False — ведущий закрыл вход
 
 
 class JoinIn(BaseModel):
@@ -259,7 +260,7 @@ class StrictMessage(BaseModel):
 
 
 class HostCommand(StrictMessage):
-    type: Literal["host:start", "host:next", "host:skip", "host:end"]
+    type: Literal["host:start", "host:next", "host:skip", "host:end", "host:lock", "host:unlock"]
     # Для «Закрыть вопрос» и «Дальше»: к какому вопросу относится нажатие.
     # Запоздавшая команда по прошлому вопросу не должна закрыть или пропустить следующий.
     questionIndex: StrictInt | None = Field(default=None, ge=0)

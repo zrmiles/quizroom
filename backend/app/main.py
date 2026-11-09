@@ -15,7 +15,7 @@ from app.config import settings
 from app.db import SessionLocal, engine, init_db
 from app.game.engine import manager
 from app.models import GameSession
-from app.rate_limits import AuthRateLimit
+from app.rate_limits import RequestRateLimit
 from app.routers import auth, quizzes, sessions, ws
 
 logging.basicConfig(level=logging.INFO)
@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.password_limiter = CapacityLimiter(4)
-    application.state.auth_rate_limit = AuthRateLimit()
+    application.state.rate_limit = RequestRateLimit()
     await init_db()
     # Комнаты живут в памяти: после перезапуска незаконченные игры продолжить нельзя.
     async with SessionLocal() as db:

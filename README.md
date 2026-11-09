@@ -85,6 +85,7 @@ cd backend && PORT=8000 uv run python scripts/live_scenarios.py
 
 - Сервер — единственный источник истины: он хранит состояние комнаты, сам закрывает вопрос по таймеру и считает очки. Клиент рисует таймер от серверного `endsAt` с поправкой на разницу часов.
 - При запуске игры вопросы копируются в `game_sessions.snapshot`, поэтому правка викторины не ломает историю и отчёты.
+- Защита комнаты: ведущий может закрыть вход, удалённый игрок не вернётся под тем же именем. С одного адреса — не больше 30 неверных PIN и 120 входов в минуту (рассчитано на класс за одним роутером).
 - **Ограничение MVP:** комнаты живут в памяти одного процесса API (один воркер). После перезапуска незаконченные игры помечаются как прерванные. Для масштабирования состояние переносится в Redis — это в плане развития.
 
 ### REST API (кратко)
@@ -107,7 +108,7 @@ cd backend && PORT=8000 uv run python scripts/live_scenarios.py
 
 Первым сообщением клиент присылает `{"type": "auth", "role": "host" | "player", "token": "…"}` — токен не передаётся в адресе, чтобы не попадать в логи сервера и прокси.
 
-- Ведущий → сервер: `host:start`, `host:next`, `host:skip`, `host:end`, `host:kick` (`host:next` и `host:skip` передают `questionIndex`, чтобы запоздавшее нажатие не задело следующий вопрос)
+- Ведущий → сервер: `host:start`, `host:next`, `host:skip`, `host:end`, `host:kick`, `host:lock` / `host:unlock` (закрыть и открыть вход для новых игроков) (`host:next` и `host:skip` передают `questionIndex`, чтобы запоздавшее нажатие не задело следующий вопрос)
 - Игрок → сервер: `player:answer {questionIndex, value}`, `player:wave`
 - Сервер → клиенты: `state:snapshot`, `lobby:update`, `lobby:wave`, `question:start`, `question:progress`, `answer:ack`, `question:reveal`, `game:finished`, `error`
 
