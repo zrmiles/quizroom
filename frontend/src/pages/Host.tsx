@@ -132,7 +132,7 @@ export function Host() {
             <span style={{ fontWeight: 600 }}>{joinUrl} → код комнаты</span>
             <span className="pin-big">{formatPin(pin)}</span>
             <div className="row" style={{ gap: 14, alignItems: 'center', flexWrap: 'nowrap' }}>
-              <QrCode value={inviteUrl} size={132} label={`QR-код для входа в комнату ${formatPin(pin)}`} />
+              <QrCode value={inviteUrl} size={148} label={`QR-код для входа в комнату ${formatPin(pin)}`} />
               <span className="small" style={{ fontWeight: 600 }}>
                 Или наведите камеру телефона на код — откроется вход в эту комнату
               </span>
