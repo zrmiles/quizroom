@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { Creature } from '../components/Creature'
+import { QrCode } from '../components/QrCode'
 import { Timer } from '../components/Timer'
 import { getToken } from '../lib/api'
 import { LETTERS, TYPE_LABELS, fishPosition, formatNumber, formatPin, formatPoints, histogram, plural } from '../lib/format'
@@ -104,6 +105,8 @@ export function Host() {
   }
 
   const joinUrl = `${window.location.host}/join`
+  // Ссылка с кодом: телефон сразу открывает ввод имени для этой комнаты.
+  const inviteUrl = `${window.location.origin}/join?pin=${pin}`
 
   return (
     <div className={`screen${s.phase === 'lobby' || s.phase === 'connecting' ? '' : ' screen-light'}`}>
@@ -128,6 +131,12 @@ export function Host() {
             <span className="display" style={{ fontSize: 36 }}>Заплывайте!</span>
             <span style={{ fontWeight: 600 }}>{joinUrl} → код комнаты</span>
             <span className="pin-big">{formatPin(pin)}</span>
+            <div className="row" style={{ gap: 14, alignItems: 'center', flexWrap: 'nowrap' }}>
+              <QrCode value={inviteUrl} size={132} label={`QR-код для входа в комнату ${formatPin(pin)}`} />
+              <span className="small" style={{ fontWeight: 600 }}>
+                Или наведите камеру телефона на код — откроется вход в эту комнату
+              </span>
+            </div>
             <div style={{ flex: 1 }} />
             <div className="row between" style={{ fontWeight: 700 }}>
               <span>В аквариуме</span>
