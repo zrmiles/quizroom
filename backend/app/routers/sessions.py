@@ -130,9 +130,20 @@ async def history(user: User = Depends(get_current_user), db: AsyncSession = Dep
             player_count=n,
             question_count=len(gs.snapshot),
             parent_session_id=gs.parent_session_id,
+            has_report=has_report(gs),
         )
         for gs, n in rows.all()
     ]
+
+
+def _played(snapshot: list[dict[str, Any]]) -> bool:
+    """Хотя бы один вопрос показали и закрыли — его итоги записаны в базу."""
+    return any("eligible" in q for q in snapshot)
+
+
+def has_report(gs: GameSession) -> bool:
+    # По прерванной игре отчёт есть, если до обрыва успели закрыть хотя бы один вопрос.
+    return gs.status == "finished" or (gs.status == "aborted" and _played(gs.snapshot))
 
 
 @router.get("/{pin}", response_model=SessionPublicOut)
@@ -213,9 +224,11 @@ async def report(
     session_id: DbIdPath, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     gs = await _own_session(db, session_id, user)
-    if gs.status == "aborted":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Игра была прервана, поэтому отчёта нет")
-    if gs.status != "finished":
+    if not has_report(gs):
+        if gs.status == "aborted":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Игра была прервана до конца первого вопроса, поэтому отчёта нет"
+            )
         raise HTTPException(status.HTTP_409_CONFLICT, "Отчёт появится, когда игра закончится")
     return build_report(gs)
 
@@ -313,6 +326,8 @@ def build_report(gs: GameSession) -> dict[str, Any]:
         "summary": {
             "shown_count": sum(shown),
             "ended_early": not all(shown),
+            # Ведущий не завершил игру или сервер перезапускался: в отчёте только закрытые вопросы.
+            "interrupted": gs.status == "aborted",
             "avg_correct_rate": round(sum(q["correct_rate"] for q in rated) / len(rated), 3) if rated else None,
             "hardest_index": hardest["index"] if hardest else None,
             "avg_response_ms": round(sum(a.response_ms for a in all_answers) / len(all_answers))
@@ -335,7 +350,7 @@ async def retry_mistakes(
 ) -> SessionCreatedOut:
     """Новая игра только из вопросов, на которые верно ответили меньше половины."""
     gs = await _own_session(db, session_id, user)
-    if gs.status != "finished":
+    if not has_report(gs):
         raise HTTPException(status.HTTP_409_CONFLICT, "Сначала закончите игру")
     rep = build_report(gs)
     hard = [q["index"] for q in rep["questions"] if q["correct_rate"] is not None and q["correct_rate"] < HARD_RATE]

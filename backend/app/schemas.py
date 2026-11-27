@@ -252,6 +252,7 @@ class SessionHistoryItem(BaseModel):
     player_count: int
     question_count: int
     parent_session_id: int | None
+    has_report: bool = False  # отчёт есть у законченных игр и у прерванных после первого вопроса
 
 
 # WebSocket-команды и ответы проверяются независимо от REST-схем.

@@ -35,6 +35,8 @@ OUTBOX_LIMIT = 256
 WAVE_COOLDOWN_MS = 1000  # «Помахать» — не чаще раза в секунду
 FINISHED_ROOM_TTL_S = 30 * 60  # закончившуюся комнату держим полчаса (переподключиться к итогам)
 IDLE_ROOM_TTL_S = 3 * 60 * 60  # брошенную комнату закрываем через 3 часа без действий
+# Все вопросы показаны, а «Показать итоги» так и не нажали (ведущий закрыл ноутбук) — завершаем сами.
+LAST_REVEAL_IDLE_S = 15 * 60
 # Сколько ждём игрока с оборванной связью, прежде чем закрыть вопрос досрочно без него.
 RECONNECT_GRACE_MS = 8000
 
@@ -108,6 +110,8 @@ class Room:
         self.timer: asyncio.Task[None] | None = None
         # Отложенные проверки «можно ли закрыть вопрос», когда истекает ожидание переподключения.
         self.rechecks: set[asyncio.Task[None]] = set()
+        # Промежуточные записи итогов в базу (после каждого закрытого вопроса).
+        self.savers: set[asyncio.Task[None]] = set()
         self.lock = asyncio.Lock()
         # Для «по порядку» игроки видят элементы перемешанными — одинаково для всех.
         self.shuffles: dict[int, list[dict[str, Any]]] = {}
@@ -551,7 +555,7 @@ class Room:
         if not waiting:
             await self._close_question()
 
-    async def _close_question(self) -> None:
+    async def _close_question(self, checkpoint: bool = True) -> None:
         if self.state != QUESTION:
             return
         self._cancel_timer()
@@ -559,10 +563,28 @@ class Room:
         await self._to_hosts(self._reveal_for_host(self.index))
         for p in list(self.players.values()):
             await self._to_player(p, self._reveal_for_player(self.index, p))
+        if checkpoint:
+            self._checkpoint_soon()
+
+    def _checkpoint_soon(self) -> None:
+        """Записать сыгранное в базу отдельной задачей.
+
+        Вопрос часто закрывается внутри обработчика сокета игрока, ответившего последним.
+        Обрыв этого соединения отменил бы запись посреди транзакции, поэтому она идёт отдельно.
+        """
+
+        async def run() -> None:
+            async with self.lock:
+                if self.state != FINISHED:  # окончательные итоги уже записал _persist
+                    await self._checkpoint()
+
+        task = asyncio.create_task(run())
+        self.savers.add(task)
+        task.add_done_callback(self.savers.discard)
 
     async def _finish(self) -> None:
         if self.state == QUESTION:
-            await self._close_question()
+            await self._close_question(checkpoint=False)  # итоги и так запишет _persist
         else:
             self._cancel_timer()
         # Ошибка оставляет комнату на разборе: ведущий может повторить завершение.
@@ -599,6 +621,9 @@ class Room:
         self._cancel_timer()
         for task in list(self.rechecks):
             task.cancel()
+        # Ждущие lock записи не нужны: shutdown вызывают под lock, после save_interrupted или удаления викторины.
+        for task in list(self.savers):
+            task.cancel()
         self.state = FINISHED
         sockets = list(self.outboxes)
         tasks = list(self.senders.values())
@@ -620,11 +645,14 @@ class Room:
         await asyncio.gather(*(close(ws) for ws in sockets))
         await asyncio.gather(*list(self.closers), return_exceptions=True)
 
-    def played_snapshot(self) -> list[dict[str, Any]]:
-        """Снимок вопросов с отметкой, что реально показывали и кто мог ответить — для честного отчёта."""
+    def played_snapshot(self, open_index: int | None = None) -> list[dict[str, Any]]:
+        """Снимок вопросов с отметкой, что реально показывали и кто мог ответить — для честного отчёта.
+
+        `open_index` — вопрос, который ещё идёт: он считается непоказанным.
+        """
         out = []
         for i, q in enumerate(self.questions):
-            if i in self.eligible:
+            if i in self.eligible and i != open_index:
                 out.append({**q, "eligible": [pid for pid in self.eligible[i] if pid in self.players]})
             else:
                 out.append({**q, "shown": False})
@@ -640,52 +668,98 @@ class Room:
                 gs.started_at = datetime.now(UTC)
                 await db.commit()
 
-    async def _persist(self) -> None:
-        try:
-            async with SessionLocal() as db:
-                gs = await db.get(GameSession, self.session_id)
-                if gs is None:
-                    raise GameError("Игра удалена, сохранить итоги нельзя")
-                gs.status = "finished"
-                gs.snapshot = self.played_snapshot()
+    async def _save(self, status: str | None, drop_strays: bool) -> None:
+        """Записать сыгранное: снимок с отметками, очки, места и ответы игроков.
+
+        `status=None` — промежуточная запись после вопроса, статус игры не меняется.
+        Вопрос, который ещё идёт, не записывается: ответили не все, кто успел бы.
+        Повтор после неопределённого исхода commit безопасен: запись целиком атомарна.
+        """
+        open_index = self.index if self.state == QUESTION else None
+        answers = {pid: {i: a for i, a in p.answers.items() if i != open_index} for pid, p in self.players.items()}
+        scores = {pid: sum(a["points"] for a in got.values()) for pid, got in answers.items()}
+        in_room = list(self.players)
+        async with SessionLocal() as db:
+            gs = await db.get(GameSession, self.session_id)
+            if gs is None:
+                raise GameError("Игра удалена, сохранить итоги нельзя")
+            if status is not None:
+                gs.status = status
                 if gs.finished_at is None:  # повтор сохранения не переписывает историю
                     gs.finished_at = datetime.now(UTC)
-                ranks = {r["id"]: r["rank"] for r in self.leaderboard()}
-                # Строки игроков без состояния в комнате (неудачный вход или удаление) в итоги не попадают.
-                await db.execute(
-                    delete(Player).where(Player.session_id == self.session_id, Player.id.not_in(list(self.players)))
-                )
-                rows = await db.scalars(select(Player).where(Player.session_id == self.session_id))
-                # Повтор после неопределённого исхода commit безопасен: запись целиком атомарна.
-                await db.execute(
-                    delete(PlayerAnswer).where(
-                        PlayerAnswer.player_id.in_(select(Player.id).where(Player.session_id == self.session_id))
-                    )
-                )
-                for row in rows:
-                    st = self.players.get(row.id)
-                    if st is None:
-                        continue
-                    row.final_score = st.score
-                    row.final_rank = ranks[row.id]
-                    row.reconnects = st.reconnects
-                    for idx, a in st.answers.items():
-                        db.add(
-                            PlayerAnswer(
-                                player_id=row.id,
-                                question_index=idx,
-                                value=a["value"],
-                                is_correct=a["correct"],
-                                response_ms=a["ms"],
-                                points=a["points"],
-                            )
+            gs.snapshot = self.played_snapshot(open_index)
+            if drop_strays:
+                # Строки игроков без состояния в комнате (неудачный вход) в итоги не попадают.
+                # Посреди игры так делать нельзя: строка может принадлежать входу, который ещё идёт.
+                await db.execute(delete(Player).where(Player.session_id == self.session_id, Player.id.not_in(in_room)))
+            await db.execute(delete(PlayerAnswer).where(PlayerAnswer.player_id.in_(in_room)))
+            rows = await db.scalars(select(Player).where(Player.session_id == self.session_id, Player.id.in_(in_room)))
+            for row in rows:
+                row.final_score = scores[row.id]
+                # Равные очки — общее место, как в таблице лидеров: 1 + число игроков с большим счётом.
+                row.final_rank = 1 + sum(1 for s in scores.values() if s > scores[row.id])
+                row.reconnects = self.players[row.id].reconnects
+                for idx, a in answers[row.id].items():
+                    db.add(
+                        PlayerAnswer(
+                            player_id=row.id,
+                            question_index=idx,
+                            value=a["value"],
+                            is_correct=a["correct"],
+                            response_ms=a["ms"],
+                            points=a["points"],
                         )
-                await db.commit()
+                    )
+            await db.commit()
+
+    async def _persist(self) -> None:
+        """Окончательные итоги. Ошибку видит ведущий и может повторить завершение."""
+        try:
+            await self._save("finished", drop_strays=True)
         except GameError:
             raise
         except Exception as e:
             log.exception("Не удалось сохранить итоги игры %s", self.session_id)
             raise GameError("Не удалось сохранить итоги. Попробуйте завершить игру ещё раз") from e
+
+    async def _checkpoint(self) -> None:
+        """Записать сыгранное после вопроса: итоги не должны жить только в памяти процесса.
+
+        Сбой базы игре не мешает — следующая запись повторит всё целиком.
+        """
+        try:
+            await self._save(None, drop_strays=False)
+        except Exception:
+            log.exception("Не удалось записать промежуточные итоги игры %s", self.session_id)
+
+    async def save_interrupted(self) -> None:
+        """Игра обрывается (простой или остановка сервера): сохраняем сыгранное как прерванную игру."""
+        if self.state == FINISHED:
+            return
+        if self.state == LOBBY:
+            await _mark_aborted(self.session_id)
+            return
+        try:
+            await self._save("aborted", drop_strays=True)
+        except Exception:
+            log.exception("Не удалось сохранить прерванную игру %s", self.session_id)
+            await _mark_aborted(self.session_id)
+
+    async def finish_abandoned(self) -> None:
+        """Все вопросы показаны, но итоги не открыли: завершаем игру так, как это сделал бы ведущий."""
+        try:
+            await self._finish()
+        except GameError:
+            log.warning("Не удалось завершить брошенную игру %s, повторим позже", self.session_id)
+            return
+        self.touch()  # итоги ещё FINISHED_ROOM_TTL_S доступны для переподключения
+
+    def idle_ttl(self) -> float:
+        if self.state == FINISHED:
+            return FINISHED_ROOM_TTL_S
+        if self.state == REVEAL and self.index == len(self.questions) - 1:
+            return LAST_REVEAL_IDLE_S
+        return IDLE_ROOM_TTL_S
 
 
 class GameError(Exception):
@@ -745,23 +819,32 @@ class GameManager:
                 self.rooms.pop(pin, None)
 
     async def sweep(self) -> None:
-        """Убрать из памяти закончившиеся и брошенные комнаты."""
-        now = time.monotonic()
+        """Убрать из памяти закончившиеся и брошенные комнаты, сохранив то, что в них сыграли."""
         for pin, room in list(self.rooms.items()):
-            idle = now - room.last_activity
-            if room.state == FINISHED and idle > FINISHED_ROOM_TTL_S:
-                async with room.lock:
-                    if time.monotonic() - room.last_activity <= FINISHED_ROOM_TTL_S:
-                        continue
-                    await room.shutdown("Время хранения итогов комнаты истекло")
-                self.rooms.pop(pin, None)
-            elif room.state != FINISHED and idle > IDLE_ROOM_TTL_S:
-                async with room.lock:
-                    if time.monotonic() - room.last_activity <= IDLE_ROOM_TTL_S:
-                        continue
-                    await room.shutdown("Комната закрыта: давно не было активности")
-                await _mark_aborted(room.session_id)
-                self.rooms.pop(pin, None)
+            if time.monotonic() - room.last_activity <= room.idle_ttl():
+                continue
+            async with room.lock:
+                # Пока ждали lock, состояние могло измениться — проверяем заново.
+                if time.monotonic() - room.last_activity <= room.idle_ttl():
+                    continue
+                if room.state == REVEAL and room.index == len(room.questions) - 1:
+                    await room.finish_abandoned()  # комната остаётся с итогами; при сбое повторим
+                    continue
+                expired = room.state == FINISHED
+                await room.save_interrupted()
+                await room.shutdown(
+                    "Время хранения итогов комнаты истекло" if expired else "Комната закрыта: давно не было активности"
+                )
+            self.rooms.pop(pin, None)
+
+    async def close_all(self, reason: str) -> None:
+        """Остановка сервера: сохраняем сыгранное и закрываем все комнаты."""
+        for room in list(self.rooms.values()):
+            async with room.lock:
+                await room.save_interrupted()
+                await room.shutdown(reason)
+        self.rooms.clear()
+        self.reserved_pins.clear()
 
 
 async def _mark_aborted(session_id: int) -> None:

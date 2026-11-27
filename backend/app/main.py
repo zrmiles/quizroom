@@ -27,6 +27,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.rate_limit = RequestRateLimit()
     await init_db()
     # Комнаты живут в памяти: после перезапуска незаконченные игры продолжить нельзя.
+    # Сыгранные вопросы уже записаны после каждого разбора, поэтому отчёт по ним останется.
     async with SessionLocal() as db:
         await db.execute(
             update(GameSession).where(GameSession.status.in_(["lobby", "running"])).values(status="aborted")
@@ -39,10 +40,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         sweeper.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await sweeper
-        for room in list(manager.rooms.values()):
-            await room.shutdown("Сервер перезапускается")
-        manager.rooms.clear()
-        manager.reserved_pins.clear()
+        await manager.close_all("Сервер перезапускается")
         await engine.dispose()
 
 

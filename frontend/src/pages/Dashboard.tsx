@@ -145,7 +145,7 @@ export function Dashboard() {
                       <td style={{ padding: '8px', textAlign: 'center' }}>{h.player_count}</td>
                       <td style={{ padding: '8px', textAlign: 'center' }} className="muted">{STATUS[h.status]}</td>
                       <td style={{ padding: '8px', textAlign: 'right' }}>
-                        {h.status === 'finished' && <Link to={`/reports/${h.id}`}>Отчёт</Link>}
+                        {(h.has_report ?? h.status === 'finished') && <Link to={`/reports/${h.id}`}>Отчёт</Link>}
                         {(h.status === 'lobby' || h.status === 'running') && <Link to={`/host/${h.pin}`}>Вернуться</Link>}
                       </td>
                     </tr>

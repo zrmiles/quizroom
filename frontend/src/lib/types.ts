@@ -134,6 +134,8 @@ export interface SessionHistoryItem {
   player_count: number
   question_count: number
   parent_session_id: number | null
+  /** Отчёт есть у законченных игр и у прерванных, где успели закрыть хотя бы один вопрос. */
+  has_report?: boolean
 }
 
 export type CellState = 'fast' | 'slow' | 'wrong' | 'none' | 'absent' | 'unshown'
@@ -152,6 +154,8 @@ export interface Report {
   summary: {
     shown_count: number
     ended_early: boolean
+    /** Игра прервалась: ведущий её не завершил или сервер перезапускался. */
+    interrupted?: boolean
     /** Доля верных по показанным вопросам; null — никто не мог ответить. */
     avg_correct_rate: number | null
     hardest_index: number | null
