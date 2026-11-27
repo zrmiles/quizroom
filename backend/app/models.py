@@ -83,7 +83,7 @@ class GameSession(Base):
     host_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     pin: Mapped[str] = mapped_column(String(6), index=True)
     title: Mapped[str] = mapped_column(String(120))
-    status: Mapped[str] = mapped_column(String(12), default="lobby")  # lobby | running | finished
+    status: Mapped[str] = mapped_column(String(12), default="lobby")  # lobby | running | finished | aborted
     snapshot: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
     parent_session_id: Mapped[int | None] = mapped_column(
         ForeignKey("game_sessions.id", ondelete="SET NULL"), nullable=True

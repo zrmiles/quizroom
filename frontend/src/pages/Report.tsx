@@ -138,7 +138,13 @@ export function ReportPage() {
           </div>
         </header>
         {error && <div role="alert" className="alert alert-error">{error}</div>}
-        {summary.ended_early && (
+        {summary.interrupted ? (
+          <div role="status" className="alert alert-info">
+            Игра прервалась: её не завершили или сервер перезапускался. В отчёте — {summary.shown_count} из{' '}
+            {session.question_count} {plural(session.question_count, 'вопроса', 'вопросов', 'вопросов')}, которые
+            успели закрыть; вопрос, шедший в момент обрыва, не учтён.
+          </div>
+        ) : summary.ended_early && (
           <div role="status" className="alert alert-info">
             Игру завершили досрочно: показали {summary.shown_count} из {session.question_count}{' '}
             {plural(session.question_count, 'вопроса', 'вопросов', 'вопросов')}. Непоказанные вопросы не входят
