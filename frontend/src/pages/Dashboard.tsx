@@ -7,6 +7,8 @@ import { useAuth } from '../lib/auth'
 import { formatDate, plural } from '../lib/format'
 import type { QuizSummary, SessionHistoryItem } from '../lib/types'
 
+const HISTORY_PAGE = 50
+
 const STATUS: Record<SessionHistoryItem['status'], string> = {
   lobby: 'идёт сбор',
   running: 'идёт игра',
@@ -24,13 +26,34 @@ export function Dashboard() {
   const [quizzesError, setQuizzesError] = useState<string | null>(null)
   const [historyError, setHistoryError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<number | null>(null)
+  // Сервер отдаёт историю страницами; полная страница — значит, могут быть ещё игры.
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
 
   const reload = useCallback(() => {
     setQuizzesError(null)
     setHistoryError(null)
     api.listQuizzes().then(setQuizzes).catch((e: Error) => setQuizzesError(e.message))
-    api.history().then(setHistory).catch((e: Error) => setHistoryError(e.message))
+    api.history()
+      .then((items) => { setHistory(items); setHasMore(items.length === HISTORY_PAGE) })
+      .catch((e: Error) => setHistoryError(e.message))
   }, [])
+
+  const loadMore = async () => {
+    const last = history[history.length - 1]
+    if (!last) return
+    setLoadingMore(true)
+    setHistoryError(null)
+    try {
+      const items = await api.history(last.id)
+      setHistory((h) => [...h, ...items.filter((i) => !h.some((x) => x.id === i.id))])
+      setHasMore(items.length === HISTORY_PAGE)
+    } catch (e) {
+      setHistoryError((e as Error).message)
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   useEffect(reload, [reload])
 
@@ -47,7 +70,7 @@ export function Dashboard() {
   }
 
   const remove = async (q: QuizSummary) => {
-    if (!window.confirm(`Удалить «${q.title}»? Вместе с ней удалится история игр.`)) return
+    if (!window.confirm(`Удалить «${q.title}»? Проведённые игры и отчёты по ней останутся в истории.`)) return
     try {
       await api.deleteQuiz(q.id)
       reload()
@@ -145,7 +168,7 @@ export function Dashboard() {
                       <td style={{ padding: '8px', textAlign: 'center' }}>{h.player_count}</td>
                       <td style={{ padding: '8px', textAlign: 'center' }} className="muted">{STATUS[h.status]}</td>
                       <td style={{ padding: '8px', textAlign: 'right' }}>
-                        {h.status === 'finished' && <Link to={`/reports/${h.id}`}>Отчёт</Link>}
+                        {(h.has_report ?? h.status === 'finished') && <Link to={`/reports/${h.id}`}>Отчёт</Link>}
                         {(h.status === 'lobby' || h.status === 'running') && <Link to={`/host/${h.pin}`}>Вернуться</Link>}
                       </td>
                     </tr>
@@ -153,6 +176,11 @@ export function Dashboard() {
                 </tbody>
               </table>
             </div>
+            {hasMore && (
+              <button type="button" className="btn" style={{ alignSelf: 'center' }} onClick={loadMore} disabled={loadingMore}>
+                {loadingMore ? 'Загружаем…' : 'Показать ещё'}
+              </button>
+            )}
           </section>
         )}
       </main>

@@ -12,6 +12,7 @@ from app.game.engine import Room, manager
 from app.game.scoring import is_exact, score
 from app.main import app
 from app.models import GameSession, Player
+from tests.conftest import game_ws
 from tests.test_audit_fixes import new_quiz
 from tests.test_game import join, open_game, recv_until
 
@@ -120,7 +121,7 @@ def test_kick_keeps_player_when_database_fails(client, host):
     async def failing_commit(_db):
         raise RuntimeError("база недоступна")
 
-    with client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h:
+    with game_ws(client, pin, host["token"], "host") as h:
         recv_until(h, "state:snapshot")
         with patch.object(AsyncSession, "commit", failing_commit):
             h.send_json({"type": "host:kick", "player_id": victim["player_id"]})

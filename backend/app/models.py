@@ -14,6 +14,8 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
     username: Mapped[str] = mapped_column(String(40))
     password_hash: Mapped[str] = mapped_column(String(100))
+    # Входит в JWT. Смена пароля или «выйти везде» увеличивает её — все выданные токены перестают действовать.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -33,7 +35,8 @@ class Quiz(Base):
     questions: Mapped[list["Question"]] = relationship(
         back_populates="quiz", cascade="all, delete-orphan", order_by="Question.position"
     )
-    sessions: Mapped[list["GameSession"]] = relationship(back_populates="quiz", cascade="all, delete-orphan")
+    # Удаление викторины не стирает проведённые игры: отчёты ценнее самой викторины (ON DELETE SET NULL).
+    sessions: Mapped[list["GameSession"]] = relationship(back_populates="quiz", passive_deletes=True)
 
 
 class Question(Base):
@@ -79,11 +82,12 @@ class GameSession(Base):
     __tablename__ = "game_sessions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    quiz_id: Mapped[int] = mapped_column(ForeignKey("quizzes.id", ondelete="CASCADE"), index=True)
+    # None — викторину удалили; игра и её отчёт остаются в истории.
+    quiz_id: Mapped[int | None] = mapped_column(ForeignKey("quizzes.id", ondelete="SET NULL"), index=True)
     host_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     pin: Mapped[str] = mapped_column(String(6), index=True)
     title: Mapped[str] = mapped_column(String(120))
-    status: Mapped[str] = mapped_column(String(12), default="lobby")  # lobby | running | finished
+    status: Mapped[str] = mapped_column(String(12), default="lobby")  # lobby | running | finished | aborted
     snapshot: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
     parent_session_id: Mapped[int | None] = mapped_column(
         ForeignKey("game_sessions.id", ondelete="SET NULL"), nullable=True
@@ -92,7 +96,7 @@ class GameSession(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    quiz: Mapped[Quiz] = relationship(back_populates="sessions")
+    quiz: Mapped[Quiz | None] = relationship(back_populates="sessions")
     players: Mapped[list["Player"]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
 

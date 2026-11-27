@@ -27,6 +27,9 @@ export function TopBar() {
             <Link to="/quizzes" className="btn btn-ghost btn-sm">
               Мои викторины
             </Link>
+            <Link to="/account" className="btn btn-ghost btn-sm">
+              Аккаунт
+            </Link>
             <button
               type="button"
               className="btn btn-sm"

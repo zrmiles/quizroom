@@ -1,3 +1,4 @@
+import secrets
 from datetime import UTC, datetime, timedelta
 
 import bcrypt
@@ -21,14 +22,24 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_access_token(user_id: int) -> str:
+# Хеш случайного пароля: вход с неизвестным email проверяет его, чтобы ответ шёл столько же,
+# сколько для существующего. Иначе по времени ответа можно узнать, зарегистрирован ли адрес.
+DUMMY_HASH = hash_password(secrets.token_urlsafe(16))
+
+
+def create_access_token(user_id: int, version: int = 0) -> str:
     expires = datetime.now(UTC) + timedelta(minutes=settings.jwt_expire_minutes)
-    return jwt.encode({"sub": str(user_id), "exp": expires}, settings.jwt_secret, algorithm=ALGORITHM)
+    payload = {"sub": str(user_id), "ver": version, "exp": expires}
+    return jwt.encode(payload, settings.jwt_secret, algorithm=ALGORITHM)
 
 
-def decode_access_token(token: str) -> int | None:
+def decode_access_token(token: str) -> tuple[int, int] | None:
+    """ID пользователя и версия токена. Токены, выданные до появления версий, считаются версией 0."""
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=[ALGORITHM])
-        return int(payload["sub"])
-    except (jwt.PyJWTError, KeyError, ValueError):
+        version = payload.get("ver", 0)
+        if not isinstance(version, int):
+            return None
+        return int(payload["sub"]), version
+    except (jwt.PyJWTError, KeyError, ValueError, TypeError):
         return None

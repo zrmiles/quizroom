@@ -1,0 +1,49 @@
+# Выкладка на сервер с доменом: HTTPS-сертификат Caddy получает и продлевает сам (Let's Encrypt).
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# Нужны: DOMAIN в .env, DNS-запись домена на этот сервер, открытые порты 80 и 443.
+
+services:
+  web:
+    # Наружу смотрит только Caddy; nginx доступен лишь внутри сети Docker.
+    ports: !reset []
+    environment:
+      # X-Forwarded-For принимаем только от Caddy — иначе адрес клиента можно было бы подделать.
+      TRUSTED_PROXY: 172.30.0.2
+    networks:
+      default:
+      edge:
+
+  caddy:
+    image: caddy:2.8-alpine
+    environment:
+      DOMAIN: ${DOMAIN:?Задайте DOMAIN в файле .env — домен, который указывает на этот сервер}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+    networks:
+      edge:
+        ipv4_address: 172.30.0.2
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  caddy_data:
+  caddy_config:

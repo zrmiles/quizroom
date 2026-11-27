@@ -48,9 +48,11 @@ export function Join() {
     }
   }
 
-  // Ссылка вида /join?pin=482913 сразу проверяет код.
+  // Ссылка вида /join?pin=482913 сразу проверяет код — один раз при открытии страницы,
+  // а не при каждом вводе шестой цифры (для этого есть кнопка «Дальше»).
   useEffect(() => {
     if (pin.length === 6) void checkPin(pin)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const onPin = (e: FormEvent) => {

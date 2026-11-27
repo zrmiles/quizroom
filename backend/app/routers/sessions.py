@@ -1,8 +1,8 @@
 import secrets
 from copy import deepcopy
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,10 +10,11 @@ from sqlalchemy.orm import selectinload
 
 from app.db import get_db
 from app.deps import get_current_user
-from app.game.engine import FINISHED, manager
+from app.game.engine import FINISHED, MAX_ROOMS, MAX_ROOMS_PER_HOST, ROOM_CAPACITY, manager
 from app.models import GameSession, Player, Question, Quiz, User
 from app.routers.quizzes import load_quiz
 from app.schemas import (
+    MAX_DB_ID,
     DbIdPath,
     JoinIn,
     JoinOut,
@@ -85,6 +86,14 @@ async def _open_room(
     db: AsyncSession, quiz_id: int, user: User, title: str, snapshot: list[dict[str, Any]], parent_id: int | None = None
 ) -> SessionCreatedOut:
     snapshot = _session_snapshot(snapshot)
+    active = [r for r in manager.rooms.values() if r.state != FINISHED]
+    if sum(1 for r in active if r.host_id == user.id) >= MAX_ROOMS_PER_HOST:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"У вас уже открыто {MAX_ROOMS_PER_HOST} комнат. Закройте лишние в разделе «Проведённые игры»",
+        )
+    if len(active) >= MAX_ROOMS:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Сервер сейчас перегружен. Попробуйте через минуту")
     pin = manager.reserve_pin()
     gs = GameSession(
         quiz_id=quiz_id, host_id=user.id, pin=pin, title=title, snapshot=snapshot, parent_session_id=parent_id
@@ -111,15 +120,30 @@ async def create_session(
 
 
 @router.get("/history", response_model=list[SessionHistoryItem])
-async def history(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    counts = select(Player.session_id, func.count(Player.id).label("n")).group_by(Player.session_id).subquery()
-    rows = await db.execute(
+async def history(
+    before: Annotated[int | None, Query(ge=1, le=MAX_DB_ID, description="Показать игры старше этой (по id)")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """История игр ведущего, новые сверху. Следующая страница — `before=<id последней игры>`."""
+    mine = select(GameSession.id).where(GameSession.host_id == user.id)
+    counts = (
+        select(Player.session_id, func.count(Player.id).label("n"))
+        .where(Player.session_id.in_(mine))
+        .group_by(Player.session_id)
+        .subquery()
+    )
+    query = (
         select(GameSession, func.coalesce(counts.c.n, 0))
         .outerjoin(counts, counts.c.session_id == GameSession.id)
         .where(GameSession.host_id == user.id)
-        .order_by(GameSession.created_at.desc(), GameSession.id.desc())
-        .limit(50)
+        .order_by(GameSession.id.desc())  # id растёт вместе со временем создания
+        .limit(limit)
     )
+    if before is not None:
+        query = query.where(GameSession.id < before)
+    rows = await db.execute(query)
     return [
         SessionHistoryItem(
             id=gs.id,
@@ -130,9 +154,20 @@ async def history(user: User = Depends(get_current_user), db: AsyncSession = Dep
             player_count=n,
             question_count=len(gs.snapshot),
             parent_session_id=gs.parent_session_id,
+            has_report=has_report(gs),
         )
         for gs, n in rows.all()
     ]
+
+
+def _played(snapshot: list[dict[str, Any]]) -> bool:
+    """Хотя бы один вопрос показали и закрыли — его итоги записаны в базу."""
+    return any("eligible" in q for q in snapshot)
+
+
+def has_report(gs: GameSession) -> bool:
+    # По прерванной игре отчёт есть, если до обрыва успели закрыть хотя бы один вопрос.
+    return gs.status == "finished" or (gs.status == "aborted" and _played(gs.snapshot))
 
 
 @router.get("/{pin}", response_model=SessionPublicOut)
@@ -169,7 +204,7 @@ async def join(pin: str, data: JoinIn, request: Request, db: AsyncSession = Depe
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Ведущий удалил игрока с этим именем из комнаты")
         if room.nickname_taken(data.nickname):
             raise HTTPException(status.HTTP_409_CONFLICT, "Такое имя уже занято — добавьте букву или цифру")
-        if len(room.players) + len(room.reserved_nicks) >= 200:
+        if len(room.players) + len(room.reserved_nicks) >= ROOM_CAPACITY:
             raise HTTPException(status.HTTP_409_CONFLICT, "Комната заполнена")
         room.reserved_nicks.add(nick_key)
     try:
@@ -213,9 +248,11 @@ async def report(
     session_id: DbIdPath, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     gs = await _own_session(db, session_id, user)
-    if gs.status == "aborted":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Игра была прервана, поэтому отчёта нет")
-    if gs.status != "finished":
+    if not has_report(gs):
+        if gs.status == "aborted":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Игра была прервана до конца первого вопроса, поэтому отчёта нет"
+            )
         raise HTTPException(status.HTTP_409_CONFLICT, "Отчёт появится, когда игра закончится")
     return build_report(gs)
 
@@ -313,6 +350,8 @@ def build_report(gs: GameSession) -> dict[str, Any]:
         "summary": {
             "shown_count": sum(shown),
             "ended_early": not all(shown),
+            # Ведущий не завершил игру или сервер перезапускался: в отчёте только закрытые вопросы.
+            "interrupted": gs.status == "aborted",
             "avg_correct_rate": round(sum(q["correct_rate"] for q in rated) / len(rated), 3) if rated else None,
             "hardest_index": hardest["index"] if hardest else None,
             "avg_response_ms": round(sum(a.response_ms for a in all_answers) / len(all_answers))
@@ -335,7 +374,7 @@ async def retry_mistakes(
 ) -> SessionCreatedOut:
     """Новая игра только из вопросов, на которые верно ответили меньше половины."""
     gs = await _own_session(db, session_id, user)
-    if gs.status != "finished":
+    if not has_report(gs):
         raise HTTPException(status.HTTP_409_CONFLICT, "Сначала закончите игру")
     rep = build_report(gs)
     hard = [q["index"] for q in rep["questions"] if q["correct_rate"] is not None and q["correct_rate"] < HARD_RATE]
@@ -345,10 +384,10 @@ async def retry_mistakes(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Трудных вопросов нет: везде верно ответили не меньше половины"
         )
-    quiz_exists = await db.scalar(select(Quiz.id).where(Quiz.id == gs.quiz_id))
-    if quiz_exists is None:
+    quiz_id = gs.quiz_id
+    if quiz_id is None or await db.scalar(select(Quiz.id).where(Quiz.id == quiz_id)) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Исходная викторина удалена")
     snapshot = [gs.snapshot[i] for i in hard]  # отметки отчёта снимет _session_snapshot
     suffix = " · работа над ошибками"
     title = gs.title if gs.title.endswith(suffix) else f"{gs.title}{suffix}"
-    return await _open_room(db, gs.quiz_id, user, title[:120], snapshot, parent_id=gs.id)
+    return await _open_room(db, quiz_id, user, title[:120], snapshot, parent_id=gs.id)

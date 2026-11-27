@@ -20,7 +20,8 @@ export function plural(n: number, one: string, few: string, many: string): strin
 
 export function formatDate(iso: string | null): string {
   if (!iso) return ''
-  const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : `${iso}Z`)
+  // Без указания пояса сервер присылает время в UTC; «+03:00», «-05:00» и «Z» оставляем как есть.
+  const d = new Date(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`)
   return d.toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
 }
 

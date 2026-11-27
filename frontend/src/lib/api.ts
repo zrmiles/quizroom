@@ -73,7 +73,7 @@ async function request<T>(path: string, init: { method?: string; body?: unknown 
   return data as T
 }
 
-interface TokenOut {
+export interface TokenOut {
   access_token: string
   user: User
 }
@@ -93,6 +93,9 @@ export const api = {
   login: (email: string, password: string) =>
     request<TokenOut>('/auth/login', { method: 'POST', body: { email, password } }),
   me: () => request<User>('/auth/me'),
+  changePassword: (currentPassword: string, password: string) =>
+    request<TokenOut>('/auth/password', { method: 'POST', body: { current_password: currentPassword, password } }),
+  logoutAll: () => request<void>('/auth/logout-all', { method: 'POST' }),
 
   listQuizzes: () => request<QuizSummary[]>('/quizzes'),
   getQuiz: (id: number) => request<Quiz>(`/quizzes/${id}`),
@@ -102,7 +105,9 @@ export const api = {
 
   createSession: (quizId: number) =>
     request<{ id: number; pin: string }>('/sessions', { method: 'POST', body: { quiz_id: quizId } }),
-  history: () => request<SessionHistoryItem[]>('/sessions/history'),
+  /** История игр по страницам: `before` — id последней уже показанной игры. */
+  history: (before?: number) =>
+    request<SessionHistoryItem[]>(`/sessions/history${before ? `?before=${before}` : ''}`),
   sessionByPin: (pin: string) =>
     request<{ pin: string; title: string; status: string; player_count: number; accepting?: boolean }>(
       `/sessions/${pin}`),

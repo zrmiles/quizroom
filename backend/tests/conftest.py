@@ -1,6 +1,7 @@
 import os
 import tempfile
 import uuid
+from contextlib import contextmanager
 
 # Отдельная SQLite-база для тестов — до импорта приложения.
 _tmp = tempfile.mkdtemp(prefix="quizroom-test-")
@@ -11,6 +12,32 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def checkpoint_only_managed_rooms(monkeypatch):
+    """Комнаты, созданные в тесте напрямую (без менеджера), не пишут итоги в базу.
+
+    У них нет строк в базе, а работают они в своём asyncio.run: запись взяла бы соединение
+    из общего пула в чужом цикле событий, и на PostgreSQL следующий тест получил бы его сломанным.
+    """
+    from app.game.engine import Room, manager
+
+    original = Room._checkpoint_soon
+
+    def guarded(self):
+        if manager.get(self.pin) is self:
+            original(self)
+
+    monkeypatch.setattr(Room, "_checkpoint_soon", guarded)
+
+
+@contextmanager
+def game_ws(client: TestClient, pin: str, token: str, role: str = "player"):
+    """Сокет комнаты с авторизацией первым сообщением, как у настоящего клиента."""
+    with client.websocket_connect(f"/ws/game/{pin}") as ws:
+        ws.send_json({"type": "auth", "role": role, "token": token})
+        yield ws
 
 
 @pytest.fixture

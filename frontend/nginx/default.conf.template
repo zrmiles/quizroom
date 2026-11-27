@@ -1,0 +1,70 @@
+# Шаблон: при запуске образ nginx подставляет переменные окружения (${TRUSTED_PROXY}) и кладёт
+# результат в /etc/nginx/conf.d/default.conf. Переменные самого nginx ($remote_addr и т. п.) не трогаются.
+
+# Адрес клиента для лимитов входа. Перед nginx может стоять TLS-прокси (Caddy в docker-compose.prod.yml) —
+# тогда X-Forwarded-For принимаем только от него. Без прокси TRUSTED_PROXY=127.0.0.1 и заголовок игнорируется,
+# иначе любой ученик подставил бы чужой адрес и обошёл ограничения.
+set_real_ip_from ${TRUSTED_PROXY};
+real_ip_header X-Forwarded-For;
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    server_tokens off;
+    client_max_body_size 1m;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 1024;
+
+    include /etc/nginx/snippets/security-headers.conf;
+
+    location /api/ {
+        proxy_pass http://api:8000;
+        proxy_set_header Host $host;
+        # Клиент не может подменить адрес, используемый лимитами входа.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+        # Эти заголовки ставит и API (для запуска без nginx) — оставляем один экземпляр, от nginx.
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header Referrer-Policy;
+    }
+
+    # WebSocket для игровых комнат
+    location /ws/ {
+        proxy_pass http://api:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Файлы с хешем в имени не меняются — кэшируем надолго.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        include /etc/nginx/snippets/security-headers.conf;
+    }
+
+    # Сама страница — всегда свежая, иначе после обновления браузер искал бы старые файлы.
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+        include /etc/nginx/snippets/security-headers.conf;
+    }
+
+    # SPA: все остальные пути отдаём index.html
+    location / {
+        try_files $uri /index.html;
+    }
+}

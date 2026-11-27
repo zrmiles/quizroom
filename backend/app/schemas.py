@@ -1,3 +1,4 @@
+import unicodedata
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -18,8 +19,20 @@ DbIdPath = Annotated[int, Path(ge=1, le=MAX_DB_ID)]
 FiniteNumber = Annotated[float, Field(allow_inf_nan=False, ge=-1e12, le=1e12)]
 
 
+def clean_text(v: str) -> str:
+    """Имя, которое видят другие: без невидимых и управляющих символов, с обычными пробелами.
+
+    NFKC сводит «двойников» (полноширинные буквы, лигатуры) к обычным символам. Символы форматирования
+    (нулевой ширины, смена направления текста) и управляющие удаляются: иначе «Маша» и «Маша» с невидимым
+    символом были бы разными именами, а имя с переворотом текста ломало бы вид таблицы лидеров.
+    """
+    v = unicodedata.normalize("NFKC", v)
+    v = "".join(ch for ch in v if ch.isspace() or unicodedata.category(ch) not in ("Cc", "Cf", "Co", "Cs", "Cn"))
+    return " ".join(v.split())
+
+
 def _strip_required(v: str, message: str) -> str:
-    v = " ".join(v.split())
+    v = clean_text(v)
     if not v:
         raise ValueError(message)
     return v
@@ -55,6 +68,13 @@ class RegisterIn(PasswordIn):
 
 class LoginIn(PasswordIn):
     email: EmailStr
+
+
+class PasswordChangeIn(PasswordIn):
+    """`password` — новый пароль (те же правила, что при регистрации)."""
+
+    current_password: str = Field(max_length=72)
+    password: str = Field(min_length=8, max_length=72)
 
 
 class UserOut(BaseModel):
@@ -231,9 +251,9 @@ class JoinIn(BaseModel):
     @field_validator("nickname")
     @classmethod
     def strip_nick(cls, v: str) -> str:
-        v = " ".join(v.split())
-        if not v:
-            raise ValueError("Введите имя")
+        v = _strip_required(v, "Введите имя")
+        if len(v) > 16:  # NFKC может удлинить строку (например, «№» → «No»)
+            raise ValueError("Имя — до 16 символов")
         return v
 
 
@@ -252,6 +272,7 @@ class SessionHistoryItem(BaseModel):
     player_count: int
     question_count: int
     parent_session_id: int | None
+    has_report: bool = False  # отчёт есть у законченных игр и у прерванных после первого вопроса
 
 
 # WebSocket-команды и ответы проверяются независимо от REST-схем.
@@ -298,4 +319,4 @@ class OrderAnswer(StrictMessage):
     order: list[StrictInt] = Field(max_length=6)
 
 
-ANSWER_SCHEMAS = {"single": SingleAnswer, "number": NumberAnswer, "order": OrderAnswer}
+ANSWER_SCHEMAS: dict[str, type[StrictMessage]] = {"single": SingleAnswer, "number": NumberAnswer, "order": OrderAnswer}

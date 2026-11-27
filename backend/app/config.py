@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,6 +15,9 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173"]
     # Сколько миллисекунд после конца таймера ещё принимаем ответ (сетевая задержка).
     answer_grace_ms: int = 300
+    # text — для разработки, json — для сервера (сборщики логов разбирают его без настройки).
+    log_format: Literal["text", "json"] = "text"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     @field_validator("jwt_secret")
     @classmethod

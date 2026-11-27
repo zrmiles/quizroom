@@ -1,5 +1,10 @@
 """Отчёт после досрочного финиша и опозданий: находки R05 и R22 аудита готовности от 5 ноября."""
 
+from contextlib import ExitStack
+
+from tests.conftest import game_ws
+from tests.test_game import join as join_as
+
 # ---------- R05, R22: отчёт только по тому, что реально показывали ----------
 
 
@@ -8,11 +13,11 @@ def _play_first_question_then_end(client, host, quiz, players_answer):
 
     sid, pin = open_game(client, host, quiz)
     joined = {nick: join(client, pin, nick) for nick in players_answer}
-    with client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h:
+    with game_ws(client, pin, host["token"], "host") as h, ExitStack() as stack:
         recv_until(h, "state:snapshot")
         sockets = {}
         for nick, info in joined.items():
-            sockets[nick] = client.websocket_connect(f"/ws/game/{pin}?token={info['token']}").__enter__()
+            sockets[nick] = stack.enter_context(game_ws(client, pin, info["token"]))
             recv_until(sockets[nick], "state:snapshot")
         h.send_json({"type": "host:start"})
         for nick, value in players_answer.items():
@@ -25,8 +30,6 @@ def _play_first_question_then_end(client, host, quiz, players_answer):
         recv_until(h, "question:reveal")
         h.send_json({"type": "host:end"})
         recv_until(h, "game:finished")
-        for ws in sockets.values():
-            ws.__exit__(None, None, None)
     return sid, late
 
 
@@ -69,8 +72,8 @@ def test_late_player_is_absent_not_wrong(client, host, quiz):
     sid, pin = open_game(client, host, quiz)
     first = join(client, pin, "Аня")
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={first['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, first["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")
@@ -87,18 +90,39 @@ def test_late_player_is_absent_not_wrong(client, host, quiz):
     assert rep["questions"][0]["correct_rate"] == 1.0  # опоздавший не тянет вниз долю верных
 
 
-def test_retry_of_empty_game_is_refused(client, host, quiz):
+def test_retry_of_game_without_participants_is_refused(client, host, quiz):
     from tests.test_game import open_game, recv_until
 
     sid, pin = open_game(client, host, quiz)
-    with client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h:
+    me = join_as(client, pin, "Один")
+    with game_ws(client, pin, host["token"], "host") as h, game_ws(client, pin, me["token"]) as p:
         recv_until(h, "state:snapshot")
+        recv_until(p, "state:snapshot")
+        h.send_json({"type": "host:start"})
+        recv_until(h, "question:start")
+        h.send_json({"type": "host:kick", "player_id": me["player_id"]})  # единственный участник удалён
+        recv_until(h, "lobby:update")
         h.send_json({"type": "host:end"})
         recv_until(h, "game:finished")
     rep = client.get(f"/api/sessions/{sid}/report", headers=host["headers"]).json()
     assert rep["summary"]["retry_count"] == 0 and rep["summary"]["avg_correct_rate"] is None
     r = client.post(f"/api/sessions/{sid}/retry", headers=host["headers"])
     assert r.status_code == 400 and "не было участников" in r.json()["detail"]
+
+
+def test_host_can_close_lobby(client, host, quiz):
+    from app.game.engine import manager
+    from tests.test_game import open_game, recv_until
+
+    sid, pin = open_game(client, host, quiz)
+    with game_ws(client, pin, host["token"], "host") as h:
+        recv_until(h, "state:snapshot")
+        h.send_json({"type": "host:end"})
+        assert recv_until(h, "error")["message"] == "Ведущий закрыл комнату"
+    assert manager.get(pin) is None
+    item = next(x for x in client.get("/api/sessions/history", headers=host["headers"]).json() if x["id"] == sid)
+    assert item["status"] == "aborted" and item["has_report"] is False
+    assert client.post(f"/api/sessions/{pin}/join", json={"nickname": "Поздно"}).status_code == 404
 
 
 def test_retry_does_not_carry_report_marks(client, host, quiz):
@@ -110,8 +134,8 @@ def test_retry_does_not_carry_report_marks(client, host, quiz):
     sid, pin = open_game(client, host, quiz)
     solo = join(client, pin, "Дима")
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={solo['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, solo["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")
