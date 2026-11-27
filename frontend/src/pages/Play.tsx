@@ -7,6 +7,7 @@ import { LETTERS, TYPE_LABELS, formatNumber, formatPoints } from '../lib/format'
 import { load, playerKey, remove, type PlayerTicket } from '../lib/storage'
 import type { PlayerFinal, PlayerReveal, PublicPlayer, PublicQuestion, RoomState } from '../lib/types'
 import { useGameSocket, type GameMessage } from '../lib/useGameSocket'
+import { useWakeLock } from '../lib/useWakeLock'
 
 interface PlayState {
   phase: RoomState | 'connecting'
@@ -86,6 +87,7 @@ export function Play() {
   }, [ticket?.playerId])
 
   const { status, deniedReason, send, offsetRef } = useGameSocket(pin, 'player', ticket?.token ?? null, onMessage)
+  useWakeLock(s.phase === 'lobby' || s.phase === 'question' || s.phase === 'reveal')
 
   useEffect(() => {
     if (status === 'denied') remove(playerKey(pin))
@@ -179,6 +181,16 @@ export function Play() {
   )
 }
 
+type AcceptedValue = { number?: number; order?: number[] } | null
+
+/** Варианты в порядке, который уже принял сервер; null — порядок неполный или от другого вопроса. */
+function orderOf(options: PublicQuestion['options'], ids: number[] | undefined) {
+  if (!ids) return null
+  const byId = new Map(options.map((o) => [o.id, o]))
+  const items = ids.map((id) => byId.get(id))
+  return items.length === options.length && items.every(Boolean) ? (items as PublicQuestion['options']) : null
+}
+
 export function QuestionView({ q, endsAt, offsetRef, answered, pending = false, myChoice, onAnswer, error }: {
   q: PublicQuestion
   endsAt: number
@@ -194,24 +206,19 @@ export function QuestionView({ q, endsAt, offsetRef, answered, pending = false, 
   const step = Math.max(Number.MIN_VALUE, 10 ** Math.floor(Math.log10((max - min) / 100)))
   const clamp = (v: number) => Math.min(max, Math.max(min, Number(v.toPrecision(15))))
   // После переподключения показываем то, что сервер уже принял, а не значения по умолчанию.
-  const accepted = myChoice as { number?: number; order?: number[] } | null
-  const acceptedOrder = (ids: number[] | undefined) => {
-    if (!ids) return null
-    const byId = new Map(q.options.map((o) => [o.id, o]))
-    const items = ids.map((id) => byId.get(id))
-    return items.length === q.options.length && items.every(Boolean) ? (items as typeof q.options) : null
-  }
+  const accepted = myChoice as AcceptedValue
   const [guessText, setGuessText] = useState(() =>
     typeof accepted?.number === 'number' ? String(accepted.number) : String(clamp(min + (max - min) / 2)))
   const guess = guessText.trim() ? Number(guessText) : NaN
   const validGuess = Number.isFinite(guess) && guess >= min && guess <= max
-  const [order, setOrder] = useState(() => acceptedOrder(accepted?.order) ?? q.options)
+  const [order, setOrder] = useState(() => orderOf(q.options, accepted?.order) ?? q.options)
+  // Пересчитываем при новом принятом ответе (например, после переподключения).
   useEffect(() => {
-    if (typeof accepted?.number === 'number') setGuessText(String(accepted.number))
-    const restoredOrder = acceptedOrder(accepted?.order)
+    const value = myChoice as AcceptedValue
+    if (typeof value?.number === 'number') setGuessText(String(value.number))
+    const restoredOrder = orderOf(q.options, value?.order)
     if (restoredOrder) setOrder(restoredOrder)
-    // Пересчитываем только при новом принятом ответе.
-  }, [myChoice])
+  }, [myChoice, q.options])
   const bigStep = step * 10
   const chosen = (myChoice as { option_id?: number } | null)?.option_id
   // Как только на таймере 0 — ответ уже не примут, поэтому сразу блокируем ввод.

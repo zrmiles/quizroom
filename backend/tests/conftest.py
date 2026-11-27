@@ -1,6 +1,7 @@
 import os
 import tempfile
 import uuid
+from contextlib import contextmanager
 
 # Отдельная SQLite-база для тестов — до импорта приложения.
 _tmp = tempfile.mkdtemp(prefix="quizroom-test-")
@@ -29,6 +30,14 @@ def checkpoint_only_managed_rooms(monkeypatch):
             original(self)
 
     monkeypatch.setattr(Room, "_checkpoint_soon", guarded)
+
+
+@contextmanager
+def game_ws(client: TestClient, pin: str, token: str, role: str = "player"):
+    """Сокет комнаты с авторизацией первым сообщением, как у настоящего клиента."""
+    with client.websocket_connect(f"/ws/game/{pin}") as ws:
+        ws.send_json({"type": "auth", "role": role, "token": token})
+        yield ws
 
 
 @pytest.fixture

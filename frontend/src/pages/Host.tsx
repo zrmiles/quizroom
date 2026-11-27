@@ -8,6 +8,7 @@ import { getToken } from '../lib/api'
 import { LETTERS, TYPE_LABELS, fishPosition, formatNumber, formatPin, formatPoints, histogram, plural } from '../lib/format'
 import type { HostFinal, HostReveal, PublicPlayer, PublicQuestion, RoomState } from '../lib/types'
 import { useGameSocket, type GameMessage } from '../lib/useGameSocket'
+import { useWakeLock } from '../lib/useWakeLock'
 
 interface HostState {
   phase: RoomState | 'connecting'
@@ -34,6 +35,7 @@ export function Host() {
   const { pin = '' } = useParams()
   const [s, setS] = useState<HostState>(initial)
   const [waving, setWaving] = useState<Set<number>>(new Set())
+  const [peopleOpen, setPeopleOpen] = useState(false)
 
   const onMessage = useCallback((msg: GameMessage) => {
     if (msg.type === 'lobby:wave') {
@@ -90,6 +92,12 @@ export function Host() {
 
   const { status, deniedReason, send, offsetRef } = useGameSocket(pin, 'host', getToken(), onMessage)
   const online = status === 'open'
+  useWakeLock(s.phase === 'lobby' || s.phase === 'question' || s.phase === 'reveal')
+  const kick = (p: PublicPlayer) => {
+    if (window.confirm(`Удалить «${p.nickname}» из комнаты? Под этим именем он вернуться не сможет.`)) {
+      cmd('host:kick', { player_id: p.id })
+    }
+  }
   const cmd = (type: string, extra: Record<string, unknown> = {}) => {
     const sent = send({ type, ...extra })
     setS((p) => ({
@@ -122,6 +130,11 @@ export function Host() {
             <span>Вопрос {s.question.index + 1} из {s.question.total}</span>
           )}
           <span>PIN {formatPin(pin)}</span>
+          {(s.phase === 'question' || s.phase === 'reveal') && (
+            <button type="button" className="btn btn-sm" onClick={() => setPeopleOpen(true)}>
+              Участники · {s.players.length}
+            </button>
+          )}
           {s.phase !== 'finished' && s.phase !== 'connecting' && (
             <button type="button" className={`btn btn-sm${s.locked ? ' btn-primary' : ''}`} disabled={!online}
               aria-pressed={s.locked} onClick={() => cmd(s.locked ? 'host:unlock' : 'host:lock')}
@@ -133,6 +146,33 @@ export function Host() {
         </span>
       </header>
       {s.error && <div role="alert" className="alert alert-error">{s.error}</div>}
+      {peopleOpen && (s.phase === 'question' || s.phase === 'reveal') && (
+        <div role="dialog" aria-modal="true" aria-label="Участники игры" className="leave-dialog"
+          onKeyDown={(e) => { if (e.key === 'Escape') setPeopleOpen(false) }}>
+          <section className="card stack" style={{ color: 'var(--ink)', maxHeight: '80vh', overflowY: 'auto', minWidth: 'min(420px, 100%)' }}>
+            <div className="row between">
+              <h2 style={{ fontSize: 22 }}>Участники · {s.players.length}</h2>
+              <button type="button" className="btn btn-sm" autoFocus onClick={() => setPeopleOpen(false)}>Закрыть</button>
+            </div>
+            <p className="small muted">Удалённый игрок сразу пропадает из игры, таблицы и отчёта.</p>
+            <ul className="stack" style={{ listStyle: 'none', margin: 0, padding: 0, gap: 8 }}>
+              {s.players.map((p) => (
+                <li key={p.id} className="row between" style={{ flexWrap: 'nowrap' }}>
+                  <span className="row" style={{ gap: 8, minWidth: 0 }}>
+                    <Creature avatar={p.avatar} size={28} />
+                    <span style={{ overflowWrap: 'anywhere' }}>{p.nickname}</span>
+                    {!p.connected && <span className="small muted">не в сети</span>}
+                  </span>
+                  <button type="button" className="btn btn-ghost btn-sm" disabled={!online} onClick={() => kick(p)}
+                    aria-label={`Удалить игрока ${p.nickname}`}>
+                    Удалить
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        </div>
+      )}
 
       {s.phase === 'connecting' && <p className="muted">Открываем комнату…</p>}
 
@@ -158,6 +198,10 @@ export function Host() {
               onClick={() => cmd('host:start')}>
               Начать игру
             </button>
+            <button type="button" className="btn btn-ghost btn-sm" disabled={!online}
+              onClick={() => window.confirm('Закрыть комнату? Игроки увидят, что игра отменена.') && cmd('host:end')}>
+              Закрыть комнату
+            </button>
             <span className="small muted">
               Нажмите на существо, чтобы удалить игрока: под тем же именем он вернуться не сможет
             </span>
@@ -171,8 +215,7 @@ export function Host() {
             )}
             {s.players.map((p) => (
               <button key={p.id} type="button" className={`fish${p.connected ? '' : ' offline'}`} style={fishPosition(p.id)}
-                aria-label={`Удалить игрока ${p.nickname}`} disabled={!online}
-                onClick={() => window.confirm(`Удалить «${p.nickname}» из комнаты?`) && cmd('host:kick', { player_id: p.id })}>
+                aria-label={`Удалить игрока ${p.nickname}`} disabled={!online} onClick={() => kick(p)}>
                 <Creature avatar={p.avatar} size={72} jump={waving.has(p.id)} />
                 <span className="name">{p.nickname}</span>
               </button>

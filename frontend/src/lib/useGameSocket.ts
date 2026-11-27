@@ -4,7 +4,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 export type SocketStatus = 'connecting' | 'open' | 'reconnecting' | 'denied'
 
 // Коды закрытия, после которых переподключаться бессмысленно.
-const FINAL_CODES = new Set([4001, 4401, 4403, 4404])
+// 4001 — ведущий удалил игрока, 4409 — игру открыли в другой вкладке, остальные — вход не принят.
+const FINAL_CODES = new Set([4001, 4401, 4403, 4404, 4409])
+const FINAL_TEXT: Record<number, string> = {
+  4001: 'Ведущий удалил вас из комнаты',
+  4409: 'Игра открыта в другой вкладке или на другом устройстве',
+}
 
 // Счётчик попыток сбрасываем, только если соединение продержалось столько времени.
 // Иначе сервер, который принимает и сразу закрывает соединение, получал бы повтор каждую секунду.
@@ -76,7 +81,7 @@ export function useGameSocket(pin: string, role: 'host' | 'player', token: strin
         if (wsRef.current === ws) readyRef.current = false
         if (stopped) return
         if (FINAL_CODES.has(ev.code)) {
-          setDeniedReason(ev.code === 4001 ? 'Ведущий удалил вас из комнаты' : lastError)
+          setDeniedReason(FINAL_TEXT[ev.code] ?? lastError)
           setStatus('denied')
           return
         }

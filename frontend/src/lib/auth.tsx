@@ -13,6 +13,10 @@ interface AuthValue {
   login: (email: string, password: string) => Promise<void>
   register: (email: string, username: string, password: string) => Promise<void>
   logout: () => void
+  /** Смена пароля: другие устройства выходят, это остаётся в системе с новым токеном. */
+  changePassword: (currentPassword: string, password: string) => Promise<void>
+  /** Выйти на всех устройствах, включая это. */
+  logoutEverywhere: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthValue | null>(null)
@@ -82,8 +86,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setRestoreError(null)
   }, [])
 
-  const value = useMemo(() => ({ user, ready, restoreError, retryRestore, login, register, logout }),
-    [user, ready, restoreError, retryRestore, login, register, logout])
+  const changePassword = useCallback(async (currentPassword: string, password: string) => {
+    const res = await api.changePassword(currentPassword, password)
+    restoreEpoch.current += 1
+    setToken(res.access_token)
+    setUser(res.user)
+  }, [])
+
+  const logoutEverywhere = useCallback(async () => {
+    await api.logoutAll()
+    logout()
+  }, [logout])
+
+  const value = useMemo(
+    () => ({ user, ready, restoreError, retryRestore, login, register, logout, changePassword, logoutEverywhere }),
+    [user, ready, restoreError, retryRestore, login, register, logout, changePassword, logoutEverywhere])
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 

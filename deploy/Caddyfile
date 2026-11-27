@@ -1,0 +1,13 @@
+# HTTPS для QuizRoom. Сертификат выпускается и продлевается автоматически; HTTP перенаправляется на HTTPS.
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		# Браузер год ходит на этот домен только по HTTPS.
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# WebSocket проксируется автоматически. Caddy сам ставит X-Forwarded-For с адресом клиента.
+	reverse_proxy web:80
+}

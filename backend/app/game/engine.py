@@ -39,6 +39,15 @@ IDLE_ROOM_TTL_S = 3 * 60 * 60  # брошенную комнату закрыв�
 LAST_REVEAL_IDLE_S = 15 * 60
 # Сколько ждём игрока с оборванной связью, прежде чем закрыть вопрос досрочно без него.
 RECONNECT_GRACE_MS = 8000
+# Вкладок на одного игрока и на ведущего. Лишняя — самая старая — закрывается: так переподключение
+# с полуоборванной связью не упирается в лимит, а один токен не открывает сотни соединений.
+MAX_PLAYER_SOCKETS = 3
+MAX_HOST_SOCKETS = 5
+REPLACED_CODE = 4409
+# Игроков в комнате, активных комнат у одного ведущего и на весь сервер (всё живёт в памяти одного процесса).
+ROOM_CAPACITY = 200
+MAX_ROOMS_PER_HOST = 5
+MAX_ROOMS = 500
 
 
 def now_ms() -> int:
@@ -104,6 +113,9 @@ class Room:
         self.ends_at_ms = 0
         self.players: dict[int, PlayerState] = {}
         self.host_sockets: set[WebSocket] = set()
+        # Порядок подключения сокетов: при превышении лимита вкладок закрывается самая старая.
+        self.attached_at: dict[WebSocket, int] = {}
+        self._seq = 0
         self.outboxes: dict[WebSocket, asyncio.Queue[dict[str, Any] | int]] = {}
         self.senders: dict[WebSocket, asyncio.Task[None]] = {}
         self.closers: set[asyncio.Task[None]] = set()
@@ -142,15 +154,34 @@ class Room:
 
     def attach(self, ws: WebSocket, player: PlayerState | None) -> None:
         if player is None:
-            self.host_sockets.add(ws)
+            group, limit = self.host_sockets, MAX_HOST_SOCKETS
         else:
             if player.connections > 0 and self.state in (QUESTION, REVEAL):
                 player.reconnects += 1
-            player.sockets.add(ws)
+            group, limit = player.sockets, MAX_PLAYER_SOCKETS
             player.connections += 1
             player.disconnected_at_ms = 0
+        self._seq += 1
+        self.attached_at[ws] = self._seq
+        group.add(ws)
         self._outbox(ws, player)
+        while len(group) > limit:
+            self._replace_oldest(group)
         self.touch()
+
+    def _replace_oldest(self, group: set[WebSocket]) -> None:
+        """Убрать самую старую вкладку: дальше ей ничего не рассылается, она получает объяснение и закрывается."""
+        old = min(group, key=lambda s: self.attached_at.get(s, 0))
+        group.discard(old)
+        self.attached_at.pop(old, None)
+        queue = self.outboxes.get(old)
+        if queue is None:
+            return
+        try:
+            queue.put_nowait({"type": "error", "message": "Игра открыта в другой вкладке или на другом устройстве"})
+            queue.put_nowait(REPLACED_CODE)
+        except asyncio.QueueFull:
+            self._drop_socket(old)
 
     def detach(self, ws: WebSocket, player: PlayerState | None) -> None:
         if player is None:
@@ -159,6 +190,7 @@ class Room:
             player.sockets.discard(ws)
             if not player.sockets:
                 player.disconnected_at_ms = now_ms()
+        self.attached_at.pop(ws, None)
         self.outboxes.pop(ws, None)
         task = self.senders.pop(ws, None)
         if task and task is not asyncio.current_task():
@@ -280,7 +312,7 @@ class Room:
     def leaderboard(self) -> list[dict[str, Any]]:
         """Равные очки — общее место (1, 2, 2, 4), как в спорте."""
         ranked = sorted(self.players.values(), key=lambda p: (-p.score, p.nickname.casefold()))
-        board = []
+        board: list[dict[str, Any]] = []
         for i, p in enumerate(ranked):
             rank = board[-1]["rank"] if board and board[-1]["score"] == p.score else i + 1
             board.append({**p.public(), "rank": rank})
@@ -433,7 +465,9 @@ class Room:
             if self.state == QUESTION:
                 await self._close_question()
         elif kind == "host:end":
-            if self.state != FINISHED:
+            if self.state == LOBBY:
+                await self.close_lobby()
+            elif self.state != FINISHED:
                 await self._finish()
         elif kind == "host:kick":
             await self._kick(msg.get("player_id"))
@@ -508,6 +542,7 @@ class Room:
             "points": points,
             "ms": response_ms,
             "exact": exact,
+            "at": datetime.now(UTC),  # время ответа для отчёта (запись в базу идёт позже)
         }
         p.score += points
         await self._ack(p)
@@ -595,8 +630,9 @@ class Room:
             await self._to_player(p, self._final_for_player(p))
 
     async def _kick(self, player_id: Any) -> None:
-        if self.state != LOBBY:
-            raise GameError("Удалять игроков можно только в лобби")
+        """Удалить игрока в любой момент игры: посторонний может войти и после старта."""
+        if self.state == FINISHED:
+            raise GameError("Игра уже закончилась")
         p = self.players.get(player_id) if isinstance(player_id, int) else None
         if p is None:
             raise GameError("Игрок не найден")
@@ -615,6 +651,20 @@ class Room:
             await self._send(ws, {"type": "kicked"})
             await self._close_socket(ws, 4001)
         await self.broadcast_lobby()
+        if self.state == QUESTION:
+            answered = sum(1 for pl in self.players.values() if self.index in pl.answers)
+            await self._to_hosts({"type": "question:progress", "answered": answered, "total": len(self.players)})
+            await self._close_if_nobody_left()  # возможно, ждали только его
+        elif self.state == REVEAL:
+            # Статистика и таблица лидеров на большом экране — уже без удалённого.
+            await self._to_hosts(self._reveal_for_host(self.index))
+
+    async def close_lobby(self) -> None:
+        """Ведущий закрыл комнату, не начав игру: она пропадает сразу, а не через несколько часов."""
+        await _mark_aborted(self.session_id)
+        await self.shutdown("Ведущий закрыл комнату")
+        if manager.get(self.pin) is self:
+            manager.rooms.pop(self.pin, None)
 
     async def shutdown(self, reason: str) -> None:
         """Закрыть комнату для всех: викторину удалили или комната брошена."""
@@ -708,6 +758,7 @@ class Room:
                             is_correct=a["correct"],
                             response_ms=a["ms"],
                             points=a["points"],
+                            answered_at=a.get("at") or datetime.now(UTC),
                         )
                     )
             await db.commit()
@@ -815,6 +866,7 @@ class GameManager:
         for pin, room in list(self.rooms.items()):
             if room.quiz_id == quiz_id:
                 async with room.lock:
+                    await room.save_interrupted()  # отчёт по сыгранному останется и после удаления викторины
                     await room.shutdown("Ведущий удалил эту викторину")
                 self.rooms.pop(pin, None)
 

@@ -71,7 +71,9 @@ def test_cannot_edit_someone_elses_quiz(client, quiz):
     other = register(client, "Чужой")
     r = client.put(f"/api/quizzes/{quiz['id']}", json=SAMPLE_QUIZ, headers=other["headers"])
     assert r.status_code == 404
-    assert client.delete(f"/api/quizzes/{quiz['id']}", headers=other["headers"]).status_code == 403
+    # Чужая викторина отвечает как несуществующая: по коду ответа не узнать, что такой ID есть.
+    assert client.delete(f"/api/quizzes/{quiz['id']}", headers=other["headers"]).status_code == 404
+    assert client.get(f"/api/quizzes/{quiz['id']}", headers=other["headers"]).status_code == 404
 
 
 def test_unknown_pin(client):

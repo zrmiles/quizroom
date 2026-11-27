@@ -22,6 +22,7 @@ from app.main import app
 from app.models import GameSession, Player, PlayerAnswer, User
 from app.routers.sessions import _session_snapshot, build_snapshot
 from app.security import hash_password, verify_password
+from tests.conftest import game_ws
 from tests.test_audit_fixes import new_quiz
 from tests.test_game import answer, join, open_game, recv_until
 
@@ -32,8 +33,8 @@ def test_ws_rejects_nonfinite_and_extra_answer_fields(client, host):
     ticket = join(client, pin, "Проверка")
     right = next(o["id"] for o in quiz["questions"][0]["options"] if o["is_correct"])
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={ticket['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, ticket["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")
@@ -67,8 +68,8 @@ def test_failed_finish_can_be_retried_without_duplicate_answers(client, host):
     ticket = join(client, pin, "Игрок")
     right = quiz["questions"][0]["options"][0]["id"]
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={ticket['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, ticket["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")

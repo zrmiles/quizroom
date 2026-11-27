@@ -29,13 +29,17 @@ def check(name: str, cond: object, detail: str = "") -> None:
 
 
 class Sock:
-    def __init__(self, url: str):
+    """Сокет комнаты. Авторизация — первым сообщением, как у настоящего клиента."""
+
+    def __init__(self, url: str, token: str, role: str = "player"):
         self.url = url
+        self.auth = {"type": "auth", "role": role, "token": token}
         self.q: asyncio.Queue = asyncio.Queue()
         self.close_code = None
 
     async def open(self) -> "Sock":
         self.ws = await websockets.connect(self.url)
+        await self.ws.send(json.dumps(self.auth))
         self.task = asyncio.create_task(self._read())
         return self
 
@@ -124,13 +128,13 @@ async def join(http, pin, nick, color="#FF7A59") -> dict:
 
 
 async def player_sock(pin, token) -> Sock:
-    s = await Sock(f"{WS}/ws/game/{pin}?token={token}").open()
+    s = await Sock(f"{WS}/ws/game/{pin}", token).open()
     await s.wait("state:snapshot")
     return s
 
 
 async def host_sock(pin, token) -> Sock:
-    s = await Sock(f"{WS}/ws/game/{pin}?role=host&token={token}").open()
+    s = await Sock(f"{WS}/ws/game/{pin}", token, "host").open()
     await s.wait("state:snapshot")
     return s
 
@@ -176,7 +180,7 @@ async def scenario_full_game(http):
     for p in ps:
         await p.wait("question:start")
     late_t = await join(http, pin, "Опоздавший", "#5BD9A0")
-    late = await Sock(f"{WS}/ws/game/{pin}?token={late_t['token']}").open()
+    late = await Sock(f"{WS}/ws/game/{pin}", late_t["token"]).open()
     snap = await late.wait("state:snapshot")
     check("опоздавший сразу получает текущий вопрос", snap["state"] == "question" and snap["question"]["index"] == 1)
     for bad, label in [
@@ -211,7 +215,7 @@ async def scenario_full_game(http):
     correct_order = [by_text[o["text"]] for o in order["options"]]
     score_before = lr["you"]["score"]
     await masha.close()
-    masha = await Sock(f"{WS}/ws/game/{pin}?token={tickets[2]['token']}").open()
+    masha = await Sock(f"{WS}/ws/game/{pin}", tickets[2]["token"]).open()
     snap = await masha.wait("state:snapshot")
     check(
         "Маша после обрыва видит тот же вопрос и может ответить",
@@ -226,7 +230,7 @@ async def scenario_full_game(http):
     await dima.send(type="player:answer", questionIndex=2, value={"order": correct_order})
     await h.wait("question:reveal", timeout=8)
     await h.close()
-    h = await Sock(f"{WS}/ws/game/{pin}?role=host&token={host['token']}").open()
+    h = await Sock(f"{WS}/ws/game/{pin}", host["token"], "host").open()
     snap = await h.wait("state:snapshot")
     check("ведущий после обрыва вернулся на разбор", snap["state"] == "reveal" and snap["reveal"]["isLast"] is True)
     await h.send(type="host:next")
@@ -270,14 +274,14 @@ async def scenario_kick_and_security(http, finished_pin):
     await p.wait("kicked")
     closed = await p.wait("__closed__")
     check("удалённый игрок отключён с кодом 4001", closed["code"] == 4001)
-    again = await Sock(f"{WS}/ws/game/{pin}?token={troll['token']}").open()
+    again = await Sock(f"{WS}/ws/game/{pin}", troll["token"]).open()
     err = await again.wait("error")
     check("удалённый не может вернуться со старым токеном", "заново" in err["message"])
     r = await http.post(f"/api/sessions/{pin}/join", json={"nickname": "Тролль"})
-    check("но может зайти заново под тем же именем", r.status_code == 201)
+    check("и не может зайти заново под тем же именем", r.status_code == 403)
 
     stranger = await new_host(http)
-    s = await Sock(f"{WS}/ws/game/{pin}?role=host&token={stranger['token']}").open()
+    s = await Sock(f"{WS}/ws/game/{pin}", stranger["token"], "host").open()
     await s.wait("error")
     check("чужой ведущий не подключится к комнате", (await s.wait("__closed__"))["code"] == 4403)
     r = await http.get(f"/api/sessions/{sid}/report", headers=stranger["h"])
@@ -293,11 +297,18 @@ async def scenario_kick_and_security(http, finished_pin):
     r = await http.post("/api/quizzes", json={"title": "Пустая"}, headers=host["h"])
     r2 = await http.post("/api/sessions", json={"quiz_id": r.json()["id"]}, headers=host["h"])
     check("пустую викторину нельзя запустить", r2.status_code == 400, r2.json().get("detail", ""))
+    newbie = await join(http, pin, "Новичок")
+    nb = await player_sock(pin, newbie["token"])
     await h.send(type="host:start")
     await h.wait("question:start")
     await h.send(type="host:kick", player_id=123456)
     err = await h.wait("error")
-    check("во время игры удалять нельзя", "лобби" in err["message"])
+    check("несуществующего игрока удалить нельзя", "не найден" in err["message"])
+    late_troll = await join(http, pin, "Поздний")
+    lt = await player_sock(pin, late_troll["token"])
+    await h.send(type="host:kick", player_id=late_troll["player_id"])
+    await lt.wait("kicked")
+    check("вошедшего во время игры можно удалить", (await lt.wait("__closed__"))["code"] == 4001)
     await h.send(type="host:skip")
     rev = await h.wait("question:reveal")
     check("ведущий может закрыть вопрос досрочно", rev["stats"]["answered"] == 0)
@@ -305,7 +316,7 @@ async def scenario_kick_and_security(http, finished_pin):
     check("повторный старт отклонён", "уже идёт" in (await h.wait("error"))["message"])
     await h.send(type="host:end")
     await h.wait("game:finished")
-    for x in (h, again):
+    for x in (h, again, nb):
         await x.close()
 
 

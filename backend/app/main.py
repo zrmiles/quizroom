@@ -9,16 +9,18 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import update
+from sqlalchemy import text, update
 
 from app.config import settings
 from app.db import SessionLocal, engine, init_db
-from app.game.engine import manager
+from app.game.engine import FINISHED, manager
+from app.logging_setup import setup_logging
 from app.models import GameSession
 from app.rate_limits import RequestRateLimit
 from app.routers import auth, quizzes, sessions, ws
 
-logging.basicConfig(level=logging.INFO)
+setup_logging(settings.log_format, settings.log_level)
+log = logging.getLogger("quizroom")
 
 
 @asynccontextmanager
@@ -51,7 +53,15 @@ async def _sweep_rooms() -> None:
         try:
             await manager.sweep()
         except Exception:
-            logging.getLogger("quizroom").exception("Не удалось почистить комнаты")
+            log.exception("Не удалось почистить комнаты")
+        rooms = list(manager.rooms.values())
+        log.info(
+            "Комнат: %d (идут: %d), игроков: %d, соединений: %d",
+            len(rooms),
+            sum(1 for r in rooms if r.state != FINISHED),
+            sum(len(r.players) for r in rooms),
+            sum(len(r.outboxes) for r in rooms),
+        )
 
 
 app = FastAPI(title="QuizRoom API", version="0.1.0", lifespan=lifespan)
@@ -98,6 +108,29 @@ app.include_router(sessions.router)
 app.include_router(ws.router)
 
 
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    """Непредвиденная ошибка: подробности — в лог, пользователю — понятный текст вместо «Internal Server Error»."""
+    log.exception("Ошибка при обработке %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Что-то пошло не так на сервере. Попробуйте ещё раз"})
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Cache-Control", "no-store")  # ответы API личные — не кэшировать
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
+
+
 @app.get("/api/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> JSONResponse:
+    """Для healthcheck контейнера и балансировщика: API отвечает и база доступна."""
+    try:
+        async with SessionLocal() as db:
+            await db.execute(text("SELECT 1"))
+    except Exception:
+        log.exception("Проверка здоровья: база недоступна")
+        return JSONResponse(status_code=503, content={"status": "error", "database": "unavailable"})
+    return JSONResponse({"status": "ok"})

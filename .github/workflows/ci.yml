@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+  schedule:
+    # Раз в неделю — новые уязвимости в зависимостях появляются и без изменений в коде.
+    - cron: "0 6 * * 1"
 
 jobs:
   backend:
@@ -36,8 +39,22 @@ jobs:
       - run: uv sync --frozen
       - name: Линтер
         run: uv run ruff check . && uv run ruff format --check .
+      - name: Типы
+        run: uv run mypy
       - name: Тесты
         run: uv run pytest
+      - name: Миграции совпадают с моделями
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./schema-check.db
+          JWT_SECRET: ci-only-secret-for-schema-check-32chars
+        run: |
+          uv run python -c "import asyncio; from app.db import init_db; asyncio.run(init_db())"
+          uv run alembic check
+      - name: Уязвимости в зависимостях
+        if: matrix.database == 'sqlite'
+        run: |
+          uv export --frozen --no-hashes --no-emit-project > requirements.txt
+          uvx pip-audit -r requirements.txt
 
   frontend:
     runs-on: ubuntu-latest
@@ -52,17 +69,34 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci --no-audit --no-fund
+      - name: Линтер
+        run: npm run lint
       - name: Тесты
         run: npm test
       - name: Типы и сборка
         run: npm run build
+      - name: Уязвимости в зависимостях
+        run: npm audit --omit=dev
 
   docker:
     runs-on: ubuntu-latest
     needs: [backend, frontend]
+    env:
+      POSTGRES_PASSWORD: ci-only-password
+      JWT_SECRET: ci-only-not-a-secret-but-long-enough-32
     steps:
       - uses: actions/checkout@v4
-      - name: Сборка образов
+      - name: Конфигурация для сервера
         env:
-          JWT_SECRET: ci-only-not-a-secret
-        run: docker compose build
+          DOMAIN: quiz.example.com
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+      - name: Сборка и запуск
+        run: docker compose up -d --build --wait --wait-timeout 180
+      - name: Проверка работающего стека
+        run: bash deploy/smoke.sh http://localhost:8080
+      - name: Логи при ошибке
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Остановка
+        if: always()
+        run: docker compose down -v

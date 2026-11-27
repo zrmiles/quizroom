@@ -64,7 +64,8 @@ export function Editor() {
     if (quizId !== null) return
     const d = loadDraft(key)
     if (d) applyDraft(d)
-  }, [key])
+    // Ключ черновика уже включает quizId, поэтому лишнего перезапуска нет.
+  }, [key, quizId])
 
   // Пока есть несохранённые правки, держим их копию во вкладке.
   useEffect(() => {
@@ -100,7 +101,8 @@ export function Editor() {
       .catch((e: Error) => { if (active) setLoadError(e.message) })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [quizId, loadAttempt])
+    // key меняется вместе с quizId или пользователем — тогда викторину и черновик и нужно перечитать.
+  }, [quizId, loadAttempt, key])
 
   // Браузер переспросит, если закрыть вкладку с несохранёнными правками.
   useEffect(() => {
@@ -334,10 +336,9 @@ export function Editor() {
 
       <details className="card" style={{ marginBottom: 16 }}>
         <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
-          Описание и доступ
+          Описание
           <span className="small muted" style={{ fontWeight: 400 }}>
-            {' · '}{isPublic ? 'открыта другим ведущим' : 'только у вас'}
-            {description.trim() ? '' : ' · без описания'}
+            {description.trim() ? '' : ' · не заполнено'}
           </span>
         </summary>
         <div className="stack" style={{ gap: 12, marginTop: 12 }}>
@@ -348,16 +349,6 @@ export function Editor() {
               value={description} onChange={(e) => { setDescription(e.target.value); markDirty() }} />
             <span className="small muted">{description.length} / 1000</span>
           </div>
-          <label className="row" style={{ gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
-            <input type="checkbox" checked={isPublic} disabled={locked} style={{ marginTop: 4 }}
-              onChange={(e) => { setIsPublic(e.target.checked); markDirty() }} />
-            <span className="stack" style={{ gap: 2 }}>
-              <span>Открыть другим ведущим</span>
-              <span className="small muted">
-                Они смогут открыть викторину по ссылке и увидят правильные ответы. Не включайте для контрольных.
-              </span>
-            </span>
-          </label>
         </div>
       </details>
 

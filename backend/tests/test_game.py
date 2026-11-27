@@ -1,6 +1,9 @@
 """Интеграционные тесты игры: REST + WebSocket, ведущий и два игрока."""
 
-from tests.conftest import register
+import pytest
+from starlette.websockets import WebSocketDisconnect
+
+from tests.conftest import game_ws, register
 
 AVATAR = {"shape": "blob", "color": "#FFD23F", "eyes": 2}
 
@@ -42,9 +45,9 @@ def test_full_game_three_question_types(client, host, quiz):
     wrong = next(o["id"] for o in single["options"] if not o["is_correct"])
 
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={anya['token']}") as pa,
-        client.websocket_connect(f"/ws/game/{pin}?token={timur['token']}") as pt,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, anya["token"]) as pa,
+        game_ws(client, pin, timur["token"]) as pt,
     ):
         assert len(recv_until(h, "state:snapshot")["players"]) == 2
         assert recv_until(pa, "state:snapshot")["you"]["nickname"] == "Аня"
@@ -120,8 +123,8 @@ def test_retry_only_mistakes(client, host, quiz):
     single = quiz["questions"][0]
     wrong = next(o["id"] for o in single["options"] if not o["is_correct"])
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={solo['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, solo["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")
@@ -144,37 +147,56 @@ def test_retry_only_mistakes(client, host, quiz):
 
 def test_host_cannot_start_without_players(client, host, quiz):
     _, pin = open_game(client, host, quiz)
-    with client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h:
+    with game_ws(client, pin, host["token"], "host") as h:
         recv_until(h, "state:snapshot")
         h.send_json({"type": "host:start"})
         assert "хотя бы одного" in recv_until(h, "error")["message"]
 
 
-def test_sockets_reject_strangers(client, host, quiz):
+def test_sockets_reject_strangers_without_revealing_the_room(client, host, quiz):
+    """Чужой токен и несуществующая комната неотличимы: иначе идущие игры находили бы перебором PIN."""
     _, pin = open_game(client, host, quiz)
     stranger = register(client, "Чужой")
-    with client.websocket_connect(f"/ws/game/{pin}?role=host&token={stranger['token']}") as ws:
+    attempts = [
+        (pin, stranger["token"], "host"),
+        (pin, "not-a-token", "player"),
+        ("999999", host["token"], "host"),
+        ("999999", "not-a-token", "player"),
+    ]
+    replies = set()
+    for room_pin, token, role in attempts:
+        with game_ws(client, room_pin, token, role) as ws:
+            message = ws.receive_json()
+            with pytest.raises(WebSocketDisconnect) as closed:
+                ws.receive_json()
+            replies.add((message["message"], closed.value.code))
+    assert len(replies) == 1
+
+
+def test_token_in_address_is_not_accepted(client, host, quiz):
+    """Токен из адреса оседал бы в логах сервера и прокси, поэтому вход — только первым сообщением."""
+    _, pin = open_game(client, host, quiz)
+    with client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as ws:
+        ws.send_json({"type": "host:start"})
         assert ws.receive_json()["type"] == "error"
-    with client.websocket_connect(f"/ws/game/{pin}?token=not-a-token") as ws:
-        assert ws.receive_json()["type"] == "error"
-    with client.websocket_connect("/ws/game/999999x?token=x") as ws:
-        assert ws.receive_json()["message"] == "Комната не найдена"
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
 
 
 def test_reconnect_gets_snapshot_with_score(client, host, quiz):
     _, pin = open_game(client, host, quiz)
     me = join(client, pin, "Лиза")
     right = next(o["id"] for o in quiz["questions"][0]["options"] if o["is_correct"])
-    with client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h:
+    with game_ws(client, pin, host["token"], "host") as h:
         recv_until(h, "state:snapshot")
-        with client.websocket_connect(f"/ws/game/{pin}?token={me['token']}") as p:
+        with game_ws(client, pin, me["token"]) as p:
             recv_until(p, "state:snapshot")
             h.send_json({"type": "host:start"})
             recv_until(p, "question:start")
             answer(p, 0, {"option_id": right})
             recv_until(p, "question:reveal")
         # Игрок «потерял связь» и вернулся
-        with client.websocket_connect(f"/ws/game/{pin}?token={me['token']}") as p2:
+        with game_ws(client, pin, me["token"]) as p2:
             snap = recv_until(p2, "state:snapshot")
             assert snap["state"] == "reveal" and snap["you"]["score"] > 0
             assert snap["reveal"]["you"]["correct"] is True
@@ -184,8 +206,8 @@ def test_kick_player_in_lobby(client, host, quiz):
     _, pin = open_game(client, host, quiz)
     troll = join(client, pin, "Тролль")
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={troll['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, troll["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")

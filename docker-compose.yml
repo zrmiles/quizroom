@@ -1,10 +1,20 @@
+# Запуск: cp .env.example .env, заполнить секреты, docker compose up -d --build → http://localhost:8080
+# На сервере с доменом и HTTPS: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# (см. раздел «Выкладка на сервер» в README).
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   db:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: quizroom
       POSTGRES_USER: quizroom
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quizroom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Задайте POSTGRES_PASSWORD в файле .env — см. .env.example}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -12,25 +22,35 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
+    logging: *logging
 
   api:
     build: ./backend
     environment:
-      DATABASE_URL: postgresql+asyncpg://quizroom:${POSTGRES_PASSWORD:-quizroom}@db:5432/quizroom
+      DATABASE_URL: postgresql+asyncpg://quizroom:${POSTGRES_PASSWORD}@db:5432/quizroom
       JWT_SECRET: ${JWT_SECRET:?Задайте JWT_SECRET в файле .env — см. .env.example}
-      CORS_ORIGINS: '["http://localhost:8080"]'
+      # Страница и API открываются с одного адреса через nginx — разрешать другие сайты не нужно.
+      CORS_ORIGINS: "[]"
+      LOG_FORMAT: json
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
+    # Время на запись прерванных игр при остановке (uvicorn ждёт до 20 с).
+    stop_grace_period: 30s
+    logging: *logging
 
   web:
     build: ./frontend
     ports:
-      - "${WEB_PORT:-8080}:80"
+      # 0.0.0.0 — телефоны в той же сети могут открыть игру по адресу компьютера.
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8080}:80"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     restart: unless-stopped
+    logging: *logging
 
 volumes:
   pgdata:

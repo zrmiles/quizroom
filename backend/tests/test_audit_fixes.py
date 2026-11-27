@@ -6,7 +6,8 @@ import pytest
 from starlette.websockets import WebSocketDisconnect
 
 from app.game.engine import IDLE_ROOM_TTL_S, manager
-from tests.conftest import register
+from app.routers.ws import DENIED_CODE, DENIED_TEXT
+from tests.conftest import game_ws, register
 from tests.test_game import AVATAR, join, open_game, recv_until
 
 ONE = {
@@ -80,7 +81,7 @@ def test_deleting_quiz_closes_its_live_room(client, host):
     quiz = new_quiz(client, host)
     _, pin = open_game(client, host, quiz)
     p = join(client, pin, "Игрок")
-    with client.websocket_connect(f"/ws/game/{pin}?token={p['token']}") as ws:
+    with game_ws(client, pin, p["token"]) as ws:
         recv_until(ws, "state:snapshot")
         assert client.delete(f"/api/quizzes/{quiz['id']}", headers=host["headers"]).status_code == 204
         assert "удалил" in recv_until(ws, "error")["message"]
@@ -114,15 +115,15 @@ def test_socket_without_auth_is_closed(client, host):
         assert ws.receive_json()["type"] == "error"
         with pytest.raises(WebSocketDisconnect) as exc:
             ws.receive_json()
-        assert exc.value.code == 4401
+        assert exc.value.code == DENIED_CODE
 
 
 def test_broken_json_does_not_drop_connection(client, host):
     _, pin = open_game(client, host, new_quiz(client, host))
     p = join(client, pin, "Ломатель")
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={p['token']}") as ws,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, p["token"]) as ws,
     ):
         recv_until(h, "state:snapshot")
         recv_until(ws, "state:snapshot")
@@ -136,8 +137,8 @@ def test_wave_flood_is_throttled(client, host):
     _, pin = open_game(client, host, new_quiz(client, host))
     p = join(client, pin, "Махатель")
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={p['token']}") as ws,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, p["token"]) as ws,
     ):
         recv_until(h, "state:snapshot")
         recv_until(ws, "state:snapshot")
@@ -161,12 +162,12 @@ def test_lobby_reconnects_are_not_reported_as_connection_problems(client, host):
     sid, pin = open_game(client, host, quiz)
     p = join(client, pin, "Нервный")
     for _ in range(3):  # закрыл и открыл вкладку в лобби
-        with client.websocket_connect(f"/ws/game/{pin}?token={p['token']}") as ws:
+        with game_ws(client, pin, p["token"]) as ws:
             recv_until(ws, "state:snapshot")
     right = next(o["id"] for o in quiz["questions"][0]["options"] if o["is_correct"])
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={p['token']}") as ws,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, p["token"]) as ws,
     ):
         recv_until(h, "state:snapshot")
         recv_until(ws, "state:snapshot")
@@ -185,4 +186,4 @@ def test_stranger_cannot_use_first_message_auth_either(client, host):
     stranger = register(client, "Чужой")
     with client.websocket_connect(f"/ws/game/{pin}") as ws:
         ws.send_json({"type": "auth", "role": "host", "token": stranger["token"]})
-        assert ws.receive_json()["message"] == "Это не ваша игра"
+        assert ws.receive_json()["message"] == DENIED_TEXT

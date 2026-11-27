@@ -17,18 +17,54 @@
 | Backend | Python 3.12, FastAPI, SQLAlchemy 2 (async), PostgreSQL / SQLite, PyJWT, bcrypt |
 | Frontend | React 18, TypeScript, Vite, React Router |
 | Тесты | Pytest (unit + интеграционные через WebSocket), Vitest |
-| Инфраструктура | Docker Compose, Nginx, GitHub Actions |
+| Инфраструктура | Docker Compose, Nginx, Caddy (HTTPS), Alembic, GitHub Actions |
 
 Дизайн и токены стиля «Риф» — [docs/DESIGN.md](docs/DESIGN.md). План проекта, модель данных и спринты — [docs/PLAN.md](docs/PLAN.md).
 
 ## Запуск через Docker
 
 ```bash
-cp .env.example .env   # впишите JWT_SECRET — без него compose не запустится
-docker compose up --build
+cp .env.example .env   # впишите POSTGRES_PASSWORD и JWT_SECRET — без них compose не запустится
+docker compose up -d --build --wait
 ```
 
-Откройте http://localhost:8080.
+Откройте http://localhost:8080. Телефоны в той же сети открывают игру по адресу компьютера, например `http://192.168.1.10:8080`.
+
+## Выкладка на сервер
+
+Нужны сервер с Docker, домен, указывающий на него, и открытые порты 80 и 443.
+
+1. Скопируйте `.env.example` в `.env` и заполните `POSTGRES_PASSWORD`, `JWT_SECRET` и `DOMAIN`.
+   Команды генерации случайных значений есть в самом файле.
+2. Запустите стек с HTTPS:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --wait
+   ```
+
+   Caddy сам получит сертификат Let's Encrypt и будет его продлевать. Наружу открыт только он;
+   nginx и API доступны лишь внутри сети Docker.
+3. Проверьте, что всё работает:
+
+   ```bash
+   bash deploy/smoke.sh https://ваш-домен
+   ```
+
+**Обновление.** `git pull`, затем та же команда `up -d --build --wait`. Схема базы обновляется сама при
+запуске API (миграции Alembic). При остановке API незаконченные игры сохраняются как прерванные, поэтому
+обновляйте сервер не во время уроков.
+
+**Резервные копии.** База — в томе `pgdata`. Копия и восстановление:
+
+```bash
+docker compose exec -T db pg_dump -U quizroom -Fc quizroom > quizroom-$(date +%F).dump
+docker compose exec -T db pg_restore -U quizroom -d quizroom --clean --if-exists < quizroom-2026-11-28.dump
+```
+
+Делайте копию перед каждым обновлением и регулярно (например, cron раз в сутки), храните её вне сервера.
+
+**Логи.** `docker compose logs -f api` — JSON, по строке на событие; раз в 5 минут API пишет сводку
+«комнат, игроков, соединений». Размер логов ограничен (5 файлов по 10 МБ на контейнер).
 
 ## Запуск для разработки
 
@@ -56,11 +92,20 @@ Dev-сервер по умолчанию слушает `127.0.0.1`; для пр
 
 Без настроек backend использует SQLite-файл `backend/quizroom.db`. Для PostgreSQL задайте `DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/db`.
 
+Схема базы ведётся миграциями Alembic и применяется автоматически при запуске API. Базы, созданные до
+появления миграций, обновляются без потери данных. Новая миграция после изменения `app/models.py`:
+
+```bash
+cd backend && uv run alembic revision --autogenerate -m "что изменилось"
+```
+
 ## Тесты
 
 ```bash
-cd backend && uv run pytest        # очки, API, WebSocket, сбои БД и конкурентные операции
-cd frontend && npm test            # проверка вопросов, форматирование, таймер, выгрузка
+cd backend && uv run pytest        # очки, API, WebSocket, миграции, сбои БД и конкурентные операции
+cd backend && uv run mypy          # типы
+cd frontend && npm test            # проверка вопросов, компоненты, переподключение, выгрузка
+cd frontend && npm run lint        # ESLint, включая правила хуков React
 ```
 
 В CI backend-тесты проходят на SQLite и PostgreSQL. Для отдельной одноразовой PostgreSQL-базы локально:
@@ -85,7 +130,10 @@ cd backend && PORT=8000 uv run python scripts/live_scenarios.py
 
 - Сервер — единственный источник истины: он хранит состояние комнаты, сам закрывает вопрос по таймеру и считает очки. Клиент рисует таймер от серверного `endsAt` с поправкой на разницу часов.
 - При запуске игры вопросы копируются в `game_sessions.snapshot`, поэтому правка викторины не ломает историю и отчёты.
-- Защита комнаты: ведущий может закрыть вход, удалённый игрок не вернётся под тем же именем. С одного адреса — не больше 30 неверных PIN и 120 входов в минуту (рассчитано на класс за одним роутером).
+- Защита комнаты: ведущий может закрыть вход и удалить игрока в любой момент игры; удалённый не вернётся под тем же именем. Невидимые символы в именах удаляются, «двойники» вроде «Маша» и «Маша» с символом нулевой ширины не проходят. С одного адреса — не больше 30 неверных PIN и 120 входов в минуту (рассчитано на класс за одним роутером). WebSocket отвечает одинаково на несуществующую комнату и чужой токен, поэтому перебором через него игры не найти.
+- Лимиты одного процесса: у ведущего до 5 открытых комнат (лобби можно закрыть кнопкой), в комнате до 200 игроков, у игрока до 3 вкладок (лишняя — самая старая — закрывается), не больше 20 сообщений в секунду с соединения.
+- Вход ведущих: пароль bcrypt, JWT на 7 дней. Смена пароля и «выйти везде» на странице «Аккаунт» отзывают все выданные токены. Восстановления пароля по почте нет — для него нужен почтовый сервер.
+- Удаление викторины не стирает проведённые по ней игры и отчёты.
 - Итоги записываются в базу после каждого закрытого вопроса. Если игру не довели до конца (ведущий ушёл, сервер перезапустился), она помечается как прерванная, но отчёт и «повторить ошибки» доступны по уже закрытым вопросам. Если после разбора последнего вопроса 15 минут никто ничего не нажимал, игра завершается сама.
 - **Ограничение MVP:** комнаты живут в памяти одного процесса API (один воркер), поэтому прерванную игру нельзя продолжить. Для масштабирования состояние переносится в Redis — это в плане развития.
 
@@ -94,12 +142,14 @@ cd backend && PORT=8000 uv run python scripts/live_scenarios.py
 | Метод | Путь | Что делает |
 |---|---|---|
 | POST | `/api/auth/register`, `/api/auth/login` | Регистрация и вход, возвращают JWT |
+| POST | `/api/auth/password` | Смена пароля; прежние токены отзываются, возвращается новый |
+| POST | `/api/auth/logout-all` | Выйти на всех устройствах |
 | GET/POST | `/api/quizzes` | Мои викторины / создать |
 | GET/PUT/DELETE | `/api/quizzes/{id}` | Викторина целиком с вопросами |
 | POST | `/api/sessions` | Запустить игру → PIN |
 | GET | `/api/sessions/{pin}` | Проверить код комнаты |
 | POST | `/api/sessions/{pin}/join` | Войти игроком (ник + аватар) → токен игрока |
-| GET | `/api/sessions/history` | История игр ведущего |
+| GET | `/api/sessions/history?before=&limit=` | История игр ведущего по страницам (новые сверху) |
 | GET | `/api/sessions/{id}/report` | Отчёт по игре |
 | POST | `/api/sessions/{id}/retry` | Новая игра из вопросов, где ошиблось большинство |
 
@@ -107,11 +157,12 @@ cd backend && PORT=8000 uv run python scripts/live_scenarios.py
 
 ### WebSocket `/ws/game/{pin}`
 
-Первым сообщением клиент присылает `{"type": "auth", "role": "host" | "player", "token": "…"}` — токен не передаётся в адресе, чтобы не попадать в логи сервера и прокси.
+Первым сообщением клиент присылает `{"type": "auth", "role": "host" | "player", "token": "…"}`. Токен в адресе не принимается: он оседал бы в логах сервера и прокси.
 
-- Ведущий → сервер: `host:start`, `host:next`, `host:skip`, `host:end`, `host:kick`, `host:lock` / `host:unlock` (закрыть и открыть вход для новых игроков) (`host:next` и `host:skip` передают `questionIndex`, чтобы запоздавшее нажатие не задело следующий вопрос)
+- Ведущий → сервер: `host:start`, `host:next`, `host:skip`, `host:end` (в лобби — закрыть комнату, в игре — завершить), `host:kick` (в любой фазе), `host:lock` / `host:unlock` (закрыть и открыть вход для новых игроков). `host:next` и `host:skip` передают `questionIndex`, чтобы запоздавшее нажатие не задело следующий вопрос.
 - Игрок → сервер: `player:answer {questionIndex, value}`, `player:wave`
-- Сервер → клиенты: `state:snapshot`, `lobby:update`, `lobby:wave`, `question:start`, `question:progress`, `answer:ack`, `question:reveal`, `game:finished`, `error`
+- Сервер → клиенты: `state:snapshot`, `lobby:update`, `lobby:wave`, `question:start`, `question:progress`, `answer:ack`, `question:reveal`, `game:finished`, `kicked`, `error`
+- Коды закрытия: `4403` — вход не принят (нет комнаты или неверный токен), `4404` — комната закрыта, `4001` — игрока удалили, `4409` — игру открыли в другой вкладке, `4429` — слишком много сообщений (клиент переподключится).
 
 ## Структура
 
@@ -123,11 +174,14 @@ backend/
   app/routers/           auth, quizzes, sessions, ws
   app/game/engine.py     игровые комнаты и таймер
   app/game/scoring.py    подсчёт очков
+  app/migrations/        миграции схемы (Alembic)
   tests/
 frontend/
-  src/pages/             главная, вход, мои викторины, редактор, ведущий, игрок, отчёт
-  src/components/        существо, таймер, шапка
+  src/pages/             главная, вход, мои викторины, редактор, ведущий, игрок, отчёт, аккаунт
+  src/components/        существо, таймер, шапка, граница ошибок
   src/lib/               API, авторизация, WebSocket, проверка вопросов
+  nginx/                 конфигурация nginx и заголовки безопасности
+deploy/                  Caddyfile для HTTPS и smoke-проверка стека
 docs/                    план и дизайн
 ```
 

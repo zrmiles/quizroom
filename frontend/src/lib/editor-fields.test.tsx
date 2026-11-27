@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Описание и доступ к викторине в редакторе (Must из docs/PLAN.md).
+// Описание викторины в редакторе. Открытие другим ведущим убрано: так они видели правильные ответы.
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { RouterProvider, createMemoryRouter } from 'react-router-dom'
@@ -19,7 +19,7 @@ const quiz: Quiz = {
   ] }],
 }
 
-it('описание и доступ показываются, правятся и сохраняются', async () => {
+it('описание показывается, правится и сохраняется, а доступа для других нет', async () => {
   vi.spyOn(api, 'getQuiz').mockResolvedValue(quiz)
   const update = vi.spyOn(api, 'updateQuiz').mockResolvedValue({ ...quiz, updated_at: 'v2' })
   const router = createMemoryRouter([{ path: '/quizzes/:id/edit', element: <Editor /> }],
@@ -27,11 +27,10 @@ it('описание и доступ показываются, правятся 
   render(<RouterProvider router={router} />)
   const description = await screen.findByLabelText('Описание')
   expect((description as HTMLTextAreaElement).value).toBe('Для 5 класса')
-  expect(screen.getByText(/только у вас/)).toBeTruthy()
+  expect(screen.queryByRole('checkbox', { name: /Открыть другим ведущим/ })).toBeNull()
   fireEvent.change(description, { target: { value: 'Повторение перед контрольной' } })
-  fireEvent.click(screen.getByRole('checkbox', { name: /Открыть другим ведущим/ }))
   expect(screen.getByText('Есть несохранённые изменения')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }))
   await waitFor(() => expect(update).toHaveBeenCalled())
-  expect(update.mock.calls[0][1]).toMatchObject({ description: 'Повторение перед контрольной', is_public: true })
+  expect(update.mock.calls[0][1]).toMatchObject({ description: 'Повторение перед контрольной', is_public: false })
 })

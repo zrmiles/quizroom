@@ -1,8 +1,8 @@
 import secrets
 from copy import deepcopy
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,10 +10,11 @@ from sqlalchemy.orm import selectinload
 
 from app.db import get_db
 from app.deps import get_current_user
-from app.game.engine import FINISHED, manager
+from app.game.engine import FINISHED, MAX_ROOMS, MAX_ROOMS_PER_HOST, ROOM_CAPACITY, manager
 from app.models import GameSession, Player, Question, Quiz, User
 from app.routers.quizzes import load_quiz
 from app.schemas import (
+    MAX_DB_ID,
     DbIdPath,
     JoinIn,
     JoinOut,
@@ -85,6 +86,14 @@ async def _open_room(
     db: AsyncSession, quiz_id: int, user: User, title: str, snapshot: list[dict[str, Any]], parent_id: int | None = None
 ) -> SessionCreatedOut:
     snapshot = _session_snapshot(snapshot)
+    active = [r for r in manager.rooms.values() if r.state != FINISHED]
+    if sum(1 for r in active if r.host_id == user.id) >= MAX_ROOMS_PER_HOST:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"У вас уже открыто {MAX_ROOMS_PER_HOST} комнат. Закройте лишние в разделе «Проведённые игры»",
+        )
+    if len(active) >= MAX_ROOMS:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Сервер сейчас перегружен. Попробуйте через минуту")
     pin = manager.reserve_pin()
     gs = GameSession(
         quiz_id=quiz_id, host_id=user.id, pin=pin, title=title, snapshot=snapshot, parent_session_id=parent_id
@@ -111,15 +120,30 @@ async def create_session(
 
 
 @router.get("/history", response_model=list[SessionHistoryItem])
-async def history(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    counts = select(Player.session_id, func.count(Player.id).label("n")).group_by(Player.session_id).subquery()
-    rows = await db.execute(
+async def history(
+    before: Annotated[int | None, Query(ge=1, le=MAX_DB_ID, description="Показать игры старше этой (по id)")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """История игр ведущего, новые сверху. Следующая страница — `before=<id последней игры>`."""
+    mine = select(GameSession.id).where(GameSession.host_id == user.id)
+    counts = (
+        select(Player.session_id, func.count(Player.id).label("n"))
+        .where(Player.session_id.in_(mine))
+        .group_by(Player.session_id)
+        .subquery()
+    )
+    query = (
         select(GameSession, func.coalesce(counts.c.n, 0))
         .outerjoin(counts, counts.c.session_id == GameSession.id)
         .where(GameSession.host_id == user.id)
-        .order_by(GameSession.created_at.desc(), GameSession.id.desc())
-        .limit(50)
+        .order_by(GameSession.id.desc())  # id растёт вместе со временем создания
+        .limit(limit)
     )
+    if before is not None:
+        query = query.where(GameSession.id < before)
+    rows = await db.execute(query)
     return [
         SessionHistoryItem(
             id=gs.id,
@@ -180,7 +204,7 @@ async def join(pin: str, data: JoinIn, request: Request, db: AsyncSession = Depe
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Ведущий удалил игрока с этим именем из комнаты")
         if room.nickname_taken(data.nickname):
             raise HTTPException(status.HTTP_409_CONFLICT, "Такое имя уже занято — добавьте букву или цифру")
-        if len(room.players) + len(room.reserved_nicks) >= 200:
+        if len(room.players) + len(room.reserved_nicks) >= ROOM_CAPACITY:
             raise HTTPException(status.HTTP_409_CONFLICT, "Комната заполнена")
         room.reserved_nicks.add(nick_key)
     try:
@@ -360,10 +384,10 @@ async def retry_mistakes(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Трудных вопросов нет: везде верно ответили не меньше половины"
         )
-    quiz_exists = await db.scalar(select(Quiz.id).where(Quiz.id == gs.quiz_id))
-    if quiz_exists is None:
+    quiz_id = gs.quiz_id
+    if quiz_id is None or await db.scalar(select(Quiz.id).where(Quiz.id == quiz_id)) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Исходная викторина удалена")
     snapshot = [gs.snapshot[i] for i in hard]  # отметки отчёта снимет _session_snapshot
     suffix = " · работа над ошибками"
     title = gs.title if gs.title.endswith(suffix) else f"{gs.title}{suffix}"
-    return await _open_room(db, gs.quiz_id, user, title[:120], snapshot, parent_id=gs.id)
+    return await _open_room(db, quiz_id, user, title[:120], snapshot, parent_id=gs.id)

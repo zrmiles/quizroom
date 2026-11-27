@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 from app import rate_limits
+from tests.conftest import game_ws
 from tests.test_audit_fixes import new_quiz
 from tests.test_game import join, open_game, recv_until
 
@@ -16,7 +17,7 @@ def _try_join(client, pin, nickname):
 def test_host_can_close_and_reopen_entry(client, host):
     _, pin = open_game(client, host, new_quiz(client, host))
     first = join(client, pin, "Аня")
-    with client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h:
+    with game_ws(client, pin, host["token"], "host") as h:
         assert recv_until(h, "state:snapshot")["locked"] is False
         h.send_json({"type": "host:lock"})
         assert recv_until(h, "lobby:update")["locked"] is True
@@ -24,7 +25,7 @@ def test_host_can_close_and_reopen_entry(client, host):
         assert r.status_code == 403 and "закрыл вход" in r.json()["detail"]
         assert client.get(f"/api/sessions/{pin}").json()["accepting"] is False
         # Уже вошедший игрок переподключается как обычно.
-        with client.websocket_connect(f"/ws/game/{pin}?token={first['token']}") as p:
+        with game_ws(client, pin, first["token"]) as p:
             assert recv_until(p, "state:snapshot")["you"]["nickname"] == "Аня"
         h.send_json({"type": "host:unlock"})
         update = recv_until(h, "lobby:update")
@@ -36,7 +37,7 @@ def test_host_can_close_and_reopen_entry(client, host):
 def test_kicked_nickname_cannot_come_back(client, host):
     _, pin = open_game(client, host, new_quiz(client, host))
     troll = join(client, pin, "Тролль")
-    with client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h:
+    with game_ws(client, pin, host["token"], "host") as h:
         recv_until(h, "state:snapshot")
         h.send_json({"type": "host:kick", "player_id": troll["player_id"]})
         update = recv_until(h, "lobby:update")

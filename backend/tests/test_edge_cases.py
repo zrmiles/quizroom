@@ -3,6 +3,7 @@
 import time
 
 from app.game.engine import PlayerState, Room
+from tests.conftest import game_ws
 from tests.test_game import answer, join, open_game, recv_until
 
 QUICK_QUIZ = {
@@ -38,8 +39,8 @@ def test_timer_closes_question_without_answers(client, host):
     _, pin = open_game(client, host, quiz)
     silent = join(client, pin, "Молчун")
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={silent['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, silent["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")
@@ -66,8 +67,8 @@ def test_late_joiner_gets_current_question_and_host_sees_them(client, host):
     first = join(client, pin, "Первый")
     right = next(o["id"] for o in quiz["questions"][0]["options"] if o["is_correct"])
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={first['token']}") as p1,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, first["token"]) as p1,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p1, "state:snapshot")
@@ -78,7 +79,7 @@ def test_late_joiner_gets_current_question_and_host_sees_them(client, host):
         while len(update["players"]) < 2:  # сначала может прийти старое обновление
             update = recv_until(h, "lobby:update")
         assert {p["nickname"] for p in update["players"]} == {"Первый", "Опоздавший"}
-        with client.websocket_connect(f"/ws/game/{pin}?token={late['token']}") as p2:
+        with game_ws(client, pin, late["token"]) as p2:
             snap = recv_until(p2, "state:snapshot")
             assert snap["state"] == "question" and snap["youAnswered"] is False
             answer(p2, 0, {"option_id": right})
@@ -100,8 +101,8 @@ def test_close_number_answer_is_not_exact(client, host):
     _, pin = open_game(client, host, quiz)
     me = join(client, pin, "Угадайка")
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={me['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, me["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")
@@ -123,8 +124,8 @@ def test_retry_title_does_not_stack(client, host):
         p = join(client, pin, "Ошибающийся")
         wrong = next(o["id"] for o in quiz["questions"][0]["options"] if not o["is_correct"])
         with (
-            client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-            client.websocket_connect(f"/ws/game/{pin}?token={p['token']}") as ws,
+            game_ws(client, pin, host["token"], "host") as h,
+            game_ws(client, pin, p["token"]) as ws,
         ):
             recv_until(h, "state:snapshot")
             recv_until(ws, "state:snapshot")

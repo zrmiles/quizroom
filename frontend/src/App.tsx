@@ -1,31 +1,47 @@
+import { Suspense, lazy, type ReactNode } from 'react'
 import { Link, Route, Routes } from 'react-router-dom'
 
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { TopBar } from './components/TopBar'
 import { RequireAuth } from './lib/auth'
 import { AuthPage } from './pages/AuthPage'
-import { Dashboard } from './pages/Dashboard'
-import { Editor } from './pages/Editor'
 import { Home } from './pages/Home'
-import { Host } from './pages/Host'
 import { Join } from './pages/Join'
 import { Play } from './pages/Play'
-import { ReportPage } from './pages/Report'
+
+// Страницы ведущего грузятся по требованию: телефону игрока они не нужны, а сеть в классе бывает медленной.
+const Dashboard = lazy(() => import('./pages/Dashboard').then((m) => ({ default: m.Dashboard })))
+const Editor = lazy(() => import('./pages/Editor').then((m) => ({ default: m.Editor })))
+const Host = lazy(() => import('./pages/Host').then((m) => ({ default: m.Host })))
+const ReportPage = lazy(() => import('./pages/Report').then((m) => ({ default: m.ReportPage })))
+const Account = lazy(() => import('./pages/Account').then((m) => ({ default: m.Account })))
+
+function HostPage({ children }: { children: ReactNode }) {
+  return (
+    <RequireAuth>
+      <Suspense fallback={<div className="container page muted">Загружаем…</div>}>{children}</Suspense>
+    </RequireAuth>
+  )
+}
 
 export function App() {
   return (
-    <Routes>
-      <Route path="/" element={<Home />} />
-      <Route path="/login" element={<AuthPage key="login" mode="login" />} />
-      <Route path="/register" element={<AuthPage key="register" mode="register" />} />
-      <Route path="/join" element={<Join />} />
-      <Route path="/play/:pin" element={<Play />} />
-      <Route path="/quizzes" element={<RequireAuth><Dashboard /></RequireAuth>} />
-      <Route path="/quizzes/new" element={<RequireAuth><Editor /></RequireAuth>} />
-      <Route path="/quizzes/:id/edit" element={<RequireAuth><Editor /></RequireAuth>} />
-      <Route path="/host/:pin" element={<RequireAuth><Host /></RequireAuth>} />
-      <Route path="/reports/:id" element={<RequireAuth><ReportPage /></RequireAuth>} />
-      <Route path="*" element={<NotFound />} />
-    </Routes>
+    <ErrorBoundary>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/login" element={<AuthPage key="login" mode="login" />} />
+        <Route path="/register" element={<AuthPage key="register" mode="register" />} />
+        <Route path="/join" element={<Join />} />
+        <Route path="/play/:pin" element={<Play />} />
+        <Route path="/quizzes" element={<HostPage><Dashboard /></HostPage>} />
+        <Route path="/quizzes/new" element={<HostPage><Editor /></HostPage>} />
+        <Route path="/quizzes/:id/edit" element={<HostPage><Editor /></HostPage>} />
+        <Route path="/host/:pin" element={<HostPage><Host /></HostPage>} />
+        <Route path="/reports/:id" element={<HostPage><ReportPage /></HostPage>} />
+        <Route path="/account" element={<HostPage><Account /></HostPage>} />
+        <Route path="*" element={<NotFound />} />
+      </Routes>
+    </ErrorBoundary>
   )
 }
 

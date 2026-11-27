@@ -8,6 +8,7 @@ from sqlalchemy import select
 from app.db import SessionLocal
 from app.game import engine as game
 from app.models import GameSession, Player, PlayerAnswer
+from tests.conftest import game_ws
 from tests.test_audit_fixes import new_quiz
 from tests.test_game import answer, join, open_game, recv_until
 
@@ -34,8 +35,8 @@ def play_first_question(client, host, quiz, pin, ticket, correct=True):
     """Ведущий запускает игру, игрок отвечает на первый вопрос; комната остаётся на разборе."""
     right, wrong = options(quiz, 0)
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={ticket['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, ticket["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")
@@ -141,8 +142,8 @@ def test_server_shutdown_saves_closed_questions_but_not_the_open_one(client, hos
     right0, _ = options(quiz, 0)
     right1, _ = options(quiz, 1)
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={ticket['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, ticket["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")
@@ -176,8 +177,8 @@ def test_game_aborted_before_first_reveal_has_no_report(client, host):
     sid, pin = open_game(client, host, quiz)
     ticket = join(client, pin, "Аня")
     with (
-        client.websocket_connect(f"/ws/game/{pin}?role=host&token={host['token']}") as h,
-        client.websocket_connect(f"/ws/game/{pin}?token={ticket['token']}") as p,
+        game_ws(client, pin, host["token"], "host") as h,
+        game_ws(client, pin, ticket["token"]) as p,
     ):
         recv_until(h, "state:snapshot")
         recv_until(p, "state:snapshot")
